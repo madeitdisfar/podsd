@@ -1,0 +1,658 @@
+use bluer::{l2cap::{SocketAddr, Socket, SeqPacket}, Address, AddressType, Result, Error};
+use std::time::Duration;
+use log::{info, error, debug};
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinSet;
+use tokio::time::{sleep, Instant};
+
+const PSM: u16 = 0x1001;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const HEADER_BYTES: [u8; 4] = [0x04, 0x00, 0x04, 0x00];
+
+pub mod opcodes {
+    pub const SET_FEATURE_FLAGS: u8 = 0x4D;
+    pub const REQUEST_NOTIFICATIONS: u8 = 0x0F;
+    pub const BATTERY_INFO: u8 = 0x04;
+    pub const CONTROL_COMMAND: u8 = 0x09;
+    pub const EAR_DETECTION: u8 = 0x06;
+    pub const CONVERSATION_AWARENESS: u8 = 0x4B;
+    pub const DEVICE_METADATA: u8 = 0x1D;
+    pub const RENAME: u8 = 0x1E;
+    pub const PROXIMITY_KEYS_REQ: u8 = 0x30;
+    pub const PROXIMITY_KEYS_RSP: u8 = 0x31;
+    pub const STEM_PRESS: u8 = 0x19;
+    pub const EQ_DATA: u8 = 0x53;
+    pub const CONNECTED_DEVICES: u8 = 0x2E;
+    pub const AUDIO_SOURCE: u8 = 0x0E;
+    pub const SMART_ROUTING: u8 = 0x10;
+    pub const SMART_ROUTING_RESP: u8 = 0x11;
+    pub const SEND_CONNECTED_MAC: u8 = 0x14;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlCommandStatus {
+    pub identifier: ControlCommandIdentifiers,
+    pub value: Vec<u8>,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlCommandIdentifiers {
+    MicMode = 0x01,
+    ButtonSendMode = 0x05,
+    VoiceTrigger = 0x12,
+    SingleClickMode = 0x14,
+    DoubleClickMode = 0x15,
+    ClickHoldMode = 0x16,
+    DoubleClickInterval = 0x17,
+    ClickHoldInterval = 0x18,
+    ListeningModeConfigs = 0x1A,
+    OneBudAncMode = 0x1B,
+    CrownRotationDirection = 0x1C,
+    ListeningMode = 0x0D,
+    AutoAnswerMode = 0x1E,
+    ChimeVolume = 0x1F,
+    VolumeSwipeInterval = 0x23,
+    CallManagementConfig = 0x24,
+    VolumeSwipeMode = 0x25,
+    AdaptiveVolumeConfig = 0x26,
+    SoftwareMuteConfig = 0x27,
+    ConversationDetectConfig = 0x28,
+    Ssl = 0x29,
+    HearingAid = 0x2C,
+    AutoAncStrength = 0x2E,
+    HpsGainSwipe = 0x2F,
+    HrmState = 0x30,
+    InCaseToneConfig = 0x31,
+    SiriMultitoneConfig = 0x32,
+    HearingAssistConfig = 0x33,
+    AllowOffOption = 0x34,
+    StemConfig = 0x39,
+    SleepDetectionConfig = 0x35,
+    AllowAutoConnect = 0x36,
+    EarDetectionConfig = 0x0A,
+    AutomaticConnectionConfig = 0x20,
+    OwnsConnection = 0x06,
+}
+
+impl ControlCommandIdentifiers {
+    fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x01 => Some(Self::MicMode),
+            0x05 => Some(Self::ButtonSendMode),
+            0x12 => Some(Self::VoiceTrigger),
+            0x14 => Some(Self::SingleClickMode),
+            0x15 => Some(Self::DoubleClickMode),
+            0x16 => Some(Self::ClickHoldMode),
+            0x17 => Some(Self::DoubleClickInterval),
+            0x18 => Some(Self::ClickHoldInterval),
+            0x1A => Some(Self::ListeningModeConfigs),
+            0x1B => Some(Self::OneBudAncMode),
+            0x1C => Some(Self::CrownRotationDirection),
+            0x0D => Some(Self::ListeningMode),
+            0x1E => Some(Self::AutoAnswerMode),
+            0x1F => Some(Self::ChimeVolume),
+            0x23 => Some(Self::VolumeSwipeInterval),
+            0x24 => Some(Self::CallManagementConfig),
+            0x25 => Some(Self::VolumeSwipeMode),
+            0x26 => Some(Self::AdaptiveVolumeConfig),
+            0x27 => Some(Self::SoftwareMuteConfig),
+            0x28 => Some(Self::ConversationDetectConfig),
+            0x29 => Some(Self::Ssl),
+            0x2C => Some(Self::HearingAid),
+            0x2E => Some(Self::AutoAncStrength),
+            0x2F => Some(Self::HpsGainSwipe),
+            0x30 => Some(Self::HrmState),
+            0x31 => Some(Self::InCaseToneConfig),
+            0x32 => Some(Self::SiriMultitoneConfig),
+            0x33 => Some(Self::HearingAssistConfig),
+            0x34 => Some(Self::AllowOffOption),
+            0x39 => Some(Self::StemConfig),
+            0x35 => Some(Self::SleepDetectionConfig),
+            0x36 => Some(Self::AllowAutoConnect),
+            0x0A => Some(Self::EarDetectionConfig),
+            0x20 => Some(Self::AutomaticConnectionConfig),
+            0x06 => Some(Self::OwnsConnection),
+            _ => None,
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProximityKeyType {
+    Irk = 0x01,
+    EncKey = 0x04,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StemPressType {
+    SinglePress = 0x05,
+    DoublePress = 0x06,
+    TriplePress = 0x07,
+    LongPress = 0x08,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StemPressBudType {
+    Left = 0x01,
+    Right = 0x02,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioSourceType {
+    None = 0x00,
+    Call = 0x01,
+    Media = 0x02,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryComponent {
+    Left = 4,
+    Right = 2,
+    Case = 8
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatteryStatus {
+    Charging = 1,
+    NotCharging = 2,
+    Disconnected = 4
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarDetectionStatus {
+    InEar = 0x00,
+    OutOfEar = 0x01,
+    InCase = 0x02,
+    Disconnected = 0x03
+}
+
+impl AudioSourceType {
+    fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x00 => Some(Self::None),
+            0x01 => Some(Self::Call),
+            0x02 => Some(Self::Media),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioSource {
+    pub mac: String,
+    pub r#type: AudioSourceType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatteryInfo {
+    pub component: BatteryComponent,
+    pub level: u8,
+    pub status: BatteryStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectedDevice {
+    pub mac: String,
+    pub info1: u8,
+    pub info2: u8,
+    pub r#type: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum AACPEvent {
+    BatteryInfo(Vec<BatteryInfo>),
+    ControlCommand(ControlCommandStatus),
+    EarDetection(Vec<EarDetectionStatus>, Vec<EarDetectionStatus>),
+    ConversationalAwareness(u8),
+    ProximityKeys(Vec<(u8, Vec<u8>)>),
+    AudioSource(AudioSource),
+    ConnectedDevices(Vec<ConnectedDevice>),
+}
+
+struct AACPManagerState {
+    sender: Option<mpsc::Sender<Vec<u8>>>,
+    control_command_status_list: Vec<ControlCommandStatus>,
+    owns: bool,
+    connected_devices: Vec<ConnectedDevice>,
+    audio_source: Option<AudioSource>,
+    battery_info: Vec<BatteryInfo>,
+    pub conversational_awareness_status: u8,
+    old_ear_detection_status: Vec<EarDetectionStatus>,
+    ear_detection_status: Vec<EarDetectionStatus>,
+    event_tx: Option<mpsc::UnboundedSender<AACPEvent>>,
+}
+
+impl AACPManagerState {
+    fn new() -> Self {
+        AACPManagerState {
+            sender: None,
+            control_command_status_list: Vec::new(),
+            owns: false,
+            connected_devices: Vec::new(),
+            audio_source: None,
+            battery_info: Vec::new(),
+            conversational_awareness_status: 0,
+            old_ear_detection_status: Vec::new(),
+            ear_detection_status: Vec::new(),
+            event_tx: None,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AACPManager {
+    state: Arc<Mutex<AACPManagerState>>,
+    tasks: Arc<Mutex<JoinSet<()>>>,
+}
+
+impl AACPManager {
+    pub fn new() -> Self {
+        AACPManager {
+            state: Arc::new(Mutex::new(AACPManagerState::new())),
+            tasks: Arc::new(Mutex::new(JoinSet::new())),
+        }
+    }
+
+    pub async fn connect(&mut self, addr: Address) {
+        info!("AACPManager connecting to {} on PSM {:#06X}...", addr, PSM);
+        let target_sa = SocketAddr::new(addr, AddressType::BrEdr, PSM);
+
+        let socket = match Socket::new_seq_packet() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to create L2CAP socket: {}", e);
+                return;
+            }
+        };
+
+        let seq_packet = match tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(target_sa)).await {
+            Ok(Ok(s)) => Arc::new(s),
+            Ok(Err(e)) => {
+                error!("L2CAP connect failed: {}", e);
+                return;
+            }
+            Err(_) => {
+                error!("L2CAP connect timed out");
+                return;
+            }
+        };
+
+        // Wait for connection to be fully established
+        let start = Instant::now();
+        loop {
+            match seq_packet.peer_addr() {
+                Ok(peer) if peer.cid != 0 => break,
+                Ok(_) => { /* still waiting */ }
+                Err(e) => {
+                    if e.raw_os_error() == Some(107) { // ENOTCONN
+                        error!("Peer has disconnected during connection setup.");
+                        return;
+                    }
+                    error!("Error getting peer address: {}", e);
+                }
+            }
+            if start.elapsed() >= CONNECT_TIMEOUT {
+                error!("Timed out waiting for L2CAP connection to be fully established.");
+                return;
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+
+        info!("L2CAP connection established with {}", addr);
+
+        let (tx, rx) = mpsc::channel(128);
+
+        let manager_clone = self.clone();
+        {
+            let mut state = self.state.lock().await;
+            state.sender = Some(tx);
+        }
+
+        let mut tasks = self.tasks.lock().await;
+        tasks.spawn(recv_thread(manager_clone, seq_packet.clone()));
+        tasks.spawn(send_thread(rx, seq_packet));
+    }
+
+    async fn send_packet(&self, data: &[u8]) -> Result<()> {
+        let state = self.state.lock().await;
+        if let Some(sender) = &state.sender {
+            sender.send(data.to_vec()).await.map_err(|e| {
+                error!("Failed to send packet to channel: {}", e);
+                Error::from(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "L2CAP send channel closed",
+                ))
+            })
+        } else {
+            error!("Cannot send packet, sender is not available.");
+            Err(Error::from(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "L2CAP stream not connected",
+            )))
+        }
+    }
+
+    async fn send_data_packet(&self, data: &[u8]) -> Result<()> {
+        let packet = [HEADER_BYTES.as_slice(), data].concat();
+        self.send_packet(&packet).await
+    }
+
+    pub async fn set_event_channel(&self, tx: mpsc::UnboundedSender<AACPEvent>) {
+        let mut state = self.state.lock().await;
+        state.event_tx = Some(tx);
+    }
+
+    pub async fn receive_packet(&self, packet: &[u8]) {
+        if !packet.starts_with(&HEADER_BYTES) {
+            debug!("Received packet does not start with expected header: {}", hex::encode(packet));
+            return;
+        }
+        if packet.len() < 5 {
+            debug!("Received packet too short: {}", hex::encode(packet));
+            return;
+        }
+
+        let opcode = packet[4];
+        let payload = &packet[4..];
+
+        match opcode {
+            opcodes::BATTERY_INFO => {
+                if payload.len() < 3 {
+                    error!("Battery Info packet too short: {}", hex::encode(payload));
+                    return;
+                }
+                let count = payload[2] as usize;
+                if payload.len() < 3 + count * 5 {
+                    error!("Battery Info packet length mismatch: {}", hex::encode(payload));
+                    return;
+                }
+                let mut batteries = Vec::with_capacity(count);
+                for i in 0..count {
+                    let base_index = 3 + i * 5;
+                    batteries.push(BatteryInfo {
+                        component: match payload[base_index] {
+                            0x02 => BatteryComponent::Right,
+                            0x04 => BatteryComponent::Left,
+                            0x08 => BatteryComponent::Case,
+                            _ => {
+                                error!("Unknown battery component: {:#04x}", payload[base_index]);
+                                continue;
+                            }
+                        },
+                        level: payload[base_index + 2],
+                        status: match payload[base_index + 3] {
+                            0x01 => BatteryStatus::Charging,
+                            0x02 => BatteryStatus::NotCharging,
+                            0x04 => BatteryStatus::Disconnected,
+                            _ => {
+                                error!("Unknown battery status: {:#04x}", payload[base_index + 3]);
+                                continue;
+                            }
+                        }
+                    });
+                }
+                let mut state = self.state.lock().await;
+                state.battery_info = batteries.clone();
+                if let Some(ref tx) = state.event_tx {
+                    let _ = tx.send(AACPEvent::BatteryInfo(batteries));
+                }
+                info!("Received Battery Info: {:?}", state.battery_info);
+            }
+            opcodes::CONTROL_COMMAND => {
+                if payload.len() < 7 {
+                    error!("Control Command packet too short: {}", hex::encode(payload));
+                    return;
+                }
+                let identifier_byte = payload[2];
+                let value_bytes = &payload[3..7];
+
+                let last_non_zero = value_bytes.iter().rposition(|&b| b != 0);
+                let value = match last_non_zero {
+                    Some(i) => value_bytes[..=i].to_vec(),
+                    None => vec![0],
+                };
+
+                if let Some(identifier) = ControlCommandIdentifiers::from_u8(identifier_byte) {
+                    let status = ControlCommandStatus { identifier, value: value.clone() };
+                    let mut state = self.state.lock().await;
+                    if let Some(existing) = state.control_command_status_list.iter_mut().find(|s| s.identifier == identifier) {
+                        existing.value = value.clone();
+                    } else {
+                        state.control_command_status_list.push(status.clone());
+                    }
+                    if identifier == ControlCommandIdentifiers::OwnsConnection {
+                        state.owns = value_bytes[0] != 0;
+                    }
+                    if let Some(ref tx) = state.event_tx {
+                        let _ = tx.send(AACPEvent::ControlCommand(status));
+                    }
+                    info!("Received Control Command: {:?}, value: {}", identifier, hex::encode(&value));
+                } else {
+                    error!("Unknown Control Command identifier: {:#04x}", identifier_byte);
+                }
+            }
+            opcodes::EAR_DETECTION => {
+                let primary_status = packet[6];
+                let secondary_status = packet[7];
+                let mut statuses = Vec::new();
+                statuses.push(match primary_status {
+                    0x00 => EarDetectionStatus::InEar,
+                    0x01 => EarDetectionStatus::OutOfEar,
+                    0x02 => EarDetectionStatus::InCase,
+                    0x03 => EarDetectionStatus::Disconnected,
+                    _ => {
+                        error!("Unknown ear detection status: {:#04x}", primary_status);
+                        EarDetectionStatus::OutOfEar
+                    }
+                });
+                statuses.push(match secondary_status {
+                    0x00 => EarDetectionStatus::InEar,
+                    0x01 => EarDetectionStatus::OutOfEar,
+                    0x02 => EarDetectionStatus::InCase,
+                    0x03 => EarDetectionStatus::Disconnected,
+                    _ => {
+                        error!("Unknown ear detection status: {:#04x}", secondary_status);
+                        EarDetectionStatus::OutOfEar
+                    }
+                });
+                let mut state = self.state.lock().await;
+                state.old_ear_detection_status = state.ear_detection_status.clone();
+                state.ear_detection_status = statuses.clone();
+                
+                if let Some(ref tx) = state.event_tx {
+                    debug!("Sending Ear Detection event: old: {:?}, new: {:?}", state.old_ear_detection_status, statuses);
+                    let _ = tx.send(AACPEvent::EarDetection(state.old_ear_detection_status.clone(), statuses));
+                }
+                info!("Received Ear Detection Status: {:?}", state.ear_detection_status);
+            }
+            opcodes::CONVERSATION_AWARENESS => {
+                if packet.len() == 10 {
+                    let status = packet[9];
+                    let mut state = self.state.lock().await;
+                    state.conversational_awareness_status = status;
+                    if let Some(ref tx) = state.event_tx {
+                        let _ = tx.send(AACPEvent::ConversationalAwareness(status));
+                    }
+                    info!("Received Conversation Awareness: {}", status);
+                } else {
+                    info!("Received Conversation Awareness packet with unexpected length: {}", packet.len());
+                }
+            }
+            opcodes::DEVICE_METADATA => info!("Received Device Metadata packet."),
+            opcodes::PROXIMITY_KEYS_RSP => {
+                if payload.len() < 4 {
+                    error!("Proximity Keys Response packet too short: {}", hex::encode(payload));
+                    return;
+                }
+                let key_count = payload[2] as usize;
+                debug!("Proximity Keys Response contains {} keys.", key_count);
+                let mut offset = 3;
+                let mut keys = Vec::new();
+                for _ in 0..key_count {
+                    if offset + 3 >= payload.len() {
+                        error!("Proximity Keys Response packet too short while parsing keys: {}", hex::encode(payload));
+                        return;
+                    }
+                    let key_type = payload[offset];
+                    let key_length = payload[offset + 2] as usize;
+                    offset += 4;
+                    if offset + key_length > payload.len() {
+                        error!("Proximity Keys Response packet too short for key data: {}", hex::encode(payload));
+                        return;
+                    }
+                    let key_data = payload[offset..offset + key_length].to_vec();
+                    keys.push((key_type, key_data));
+                    offset += key_length;
+                }
+                info!("Received Proximity Keys Response: {:?}", keys.iter().map(|(kt, kd)| (kt, hex::encode(kd))).collect::<Vec<_>>());
+                let state = self.state.lock().await;
+                if let Some(ref tx) = state.event_tx {
+                    let _ = tx.send(AACPEvent::ProximityKeys(keys));
+                }
+            },
+            opcodes::STEM_PRESS => info!("Received Stem Press packet."),
+            opcodes::AUDIO_SOURCE => {
+                if payload.len() < 9 {
+                    error!("Audio Source packet too short: {}", hex::encode(payload));
+                    return;
+                }
+                let mac = format!(
+                    "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                    payload[7], payload[6], payload[5], payload[4], payload[3], payload[2]
+                );
+                let typ = AudioSourceType::from_u8(payload[8]).unwrap_or(AudioSourceType::None);
+                let audio_source = AudioSource { mac, r#type: typ };
+                let mut state = self.state.lock().await;
+                state.audio_source = Some(audio_source.clone());
+                if let Some(ref tx) = state.event_tx {
+                    let _ = tx.send(AACPEvent::AudioSource(audio_source));
+                }
+                info!("Received Audio Source: {:?}", state.audio_source);
+            }
+            opcodes::CONNECTED_DEVICES => {
+                if payload.len() < 3 {
+                    error!("Connected Devices packet too short: {}", hex::encode(payload));
+                    return;
+                }
+                let count = payload[2] as usize;
+                if payload.len() < 3 + count * 8 {
+                    error!("Connected Devices packet length mismatch: {}", hex::encode(payload));
+                    return;
+                }
+                let mut devices = Vec::with_capacity(count);
+                for i in 0..count {
+                    let base = 5 + i * 8;
+                    let mac = format!(
+                        "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                        payload[base], payload[base + 1], payload[base + 2], payload[base + 3], payload[base + 4], payload[base + 5]
+                    );
+                    let info1 = payload[base + 6];
+                    let info2 = payload[base + 7];
+                    devices.push(ConnectedDevice { mac, info1, info2, r#type: None });
+                }
+                let mut state = self.state.lock().await;
+                state.connected_devices = devices.clone();
+                if let Some(ref tx) = state.event_tx {
+                    let _ = tx.send(AACPEvent::ConnectedDevices(devices));
+                }
+                info!("Received Connected Devices: {:?}", state.connected_devices);
+            }
+            opcodes::SMART_ROUTING_RESP => {
+                info!("Received Smart Routing Response: {:?}", &payload[1..]);
+            }
+            opcodes::EQ_DATA => {
+                 debug!("Received EQ Data");
+            }
+            _ => debug!("Received unknown packet with opcode {:#04x}", opcode),
+        }
+    }
+
+    pub async fn send_notification_request(&self) -> Result<()> {
+        let opcode = [opcodes::REQUEST_NOTIFICATIONS, 0x00];
+        let data = [0xFF, 0xFF, 0xFF, 0xFF];
+        let packet = [opcode.as_slice(), data.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_set_feature_flags_packet(&self) -> Result<()> {
+        let opcode = [opcodes::SET_FEATURE_FLAGS, 0x00];
+        let data = [0xD7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let packet = [opcode.as_slice(), data.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_handshake(&self) -> Result<()> {
+        let packet = [
+            0x00, 0x00, 0x04, 0x00,
+            0x01, 0x00, 0x02, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00
+        ];
+        self.send_packet(&packet).await
+    }
+
+    pub async fn send_proximity_keys_request(&self, key_types: Vec<ProximityKeyType>) -> Result<()> {
+        let opcode = [opcodes::PROXIMITY_KEYS_REQ, 0x00];
+        let mut data = Vec::with_capacity( 2);
+        data.push(key_types.iter().fold(0u8, |acc, kt| acc | (*kt as u8)));
+        data.push(0x00);
+        let packet = [opcode.as_slice(), data.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_rename_packet(&self, name: &str) -> Result<()> {
+        let name_bytes = name.as_bytes();
+        let size = name_bytes.len();
+        let mut packet = Vec::with_capacity(5 + size);
+        packet.push(opcodes::RENAME);
+        packet.push(0x00);
+        packet.push(size as u8);
+        packet.push(0x00);
+        packet.extend_from_slice(name_bytes);
+        self.send_data_packet(&packet).await
+    }
+}
+
+async fn recv_thread(manager: AACPManager, sp: Arc<SeqPacket>) {
+    let mut buf = vec![0u8; 1024];
+    loop {
+        match sp.recv(&mut buf).await {
+            Ok(0) => {
+                info!("Remote closed the connection.");
+                break;
+            }
+            Ok(n) => {
+                let data = &buf[..n];
+                debug!("Received {} bytes: {}", n, hex::encode(data));
+                manager.receive_packet(data).await;
+            }
+            Err(e) => {
+                error!("Read error: {}", e);
+                break;
+            }
+        }
+    }
+    let mut state = manager.state.lock().await;
+    state.sender = None;
+}
+
+async fn send_thread(mut rx: mpsc::Receiver<Vec<u8>>, sp: Arc<SeqPacket>) {
+    while let Some(data) = rx.recv().await {
+        if let Err(e) = sp.send(&data).await {
+            error!("Failed to send data: {}", e);
+            break;
+        }
+        debug!("Sent {} bytes: {}", data.len(), hex::encode(&data));
+    }
+    info!("Send thread finished.");
+}

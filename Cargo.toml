@@ -1,0 +1,15 @@
+[package]
+name = "librepods-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = {version = "1.47.1", features = ["full"]}
+bluer = { version = "0.17.4", features = ["full"] }
+env_logger = {version = "0.11.8", features = ["auto-color"]}
+uuid = "1.18.1"
+log = "0.4.28"
+dbus = "0.9.9"
+hex = "0.4.3"
+iced = {version = "0.13.1", features = ["tokio", "auto-detect-theme"]}
+libpulse-binding = "2.30.1"
