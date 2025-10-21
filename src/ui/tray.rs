@@ -110,14 +110,16 @@ impl ksni::Tray for MyTray {
                 activate: Box::new(|this: &mut Self| {
                     if let Some(tx) = &this.command_tx {
                         if let Some(is_enabled) = this.conversation_detect_enabled {
-                            let value = if is_enabled { 0x02 } else { 0x01 };
+                            let new_state = !is_enabled;
+                            let value = if !new_state { 0x02 } else { 0x01 };
                             let _ = tx.send((ControlCommandIdentifiers::ConversationDetectConfig, vec![value]));
+                            this.conversation_detect_enabled = Some(new_state);
                         }
                     }
                 }),
                 ..Default::default()
             }
-            .into(),    
+            .into(),
             StandardItem {
                 label: "Exit".into(),
                 icon_name: "application-exit".into(),
