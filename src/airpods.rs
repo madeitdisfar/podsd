@@ -133,6 +133,11 @@ impl AirPodsDevice {
                     AACPEvent::ControlCommand(status) => {
                         debug!("Received ControlCommand event: {:?}", status);
                     }
+                    AACPEvent::ConversationalAwareness(status) => {
+                        debug!("Received ConversationalAwareness event: {}", status);
+                        let controller = mc_clone.lock().await;
+                        controller.handle_conversational_awareness(status).await;
+                    }
                     _ => {}
                 }
             }
