@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Instant};
+use std::collections::HashMap;
 
 const PSM: u16 = 0x1001;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -31,14 +32,14 @@ pub mod opcodes {
     pub const SEND_CONNECTED_MAC: u8 = 0x14;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ControlCommandStatus {
     pub identifier: ControlCommandIdentifiers,
     pub value: Vec<u8>,
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlCommandIdentifiers {
     MicMode = 0x01,
     ButtonSendMode = 0x05,
@@ -222,6 +223,7 @@ pub enum AACPEvent {
 struct AACPManagerState {
     sender: Option<mpsc::Sender<Vec<u8>>>,
     control_command_status_list: Vec<ControlCommandStatus>,
+    control_command_subscribers: HashMap<ControlCommandIdentifiers, Vec<mpsc::UnboundedSender<Vec<u8>>>>,
     owns: bool,
     connected_devices: Vec<ConnectedDevice>,
     audio_source: Option<AudioSource>,
@@ -237,6 +239,7 @@ impl AACPManagerState {
         AACPManagerState {
             sender: None,
             control_command_status_list: Vec::new(),
+            control_command_subscribers: HashMap::new(),
             owns: false,
             connected_devices: Vec::new(),
             audio_source: None,
@@ -352,6 +355,15 @@ impl AACPManager {
         state.event_tx = Some(tx);
     }
 
+    pub async fn subscribe_to_control_command(&self, identifier: ControlCommandIdentifiers, tx: mpsc::UnboundedSender<Vec<u8>>) {
+        let mut state = self.state.lock().await;
+        state.control_command_subscribers.entry(identifier).or_default().push(tx);
+        // send initial value if available
+        if let Some(status) = state.control_command_status_list.iter().find(|s| s.identifier == identifier) {
+            let _ = state.control_command_subscribers.get(&identifier).unwrap().last().unwrap().send(status.value.clone());
+        }
+    }
+
     pub async fn receive_packet(&self, packet: &[u8]) {
         if !packet.starts_with(&HEADER_BYTES) {
             debug!("Received packet does not start with expected header: {}", hex::encode(packet));
@@ -432,6 +444,11 @@ impl AACPManager {
                     }
                     if identifier == ControlCommandIdentifiers::OwnsConnection {
                         state.owns = value_bytes[0] != 0;
+                    }
+                    if let Some(subscribers) = state.control_command_subscribers.get(&identifier) {
+                        for sub in subscribers {
+                            let _ = sub.send(value.clone());
+                        }
                     }
                     if let Some(ref tx) = state.event_tx {
                         let _ = tx.send(AACPEvent::ControlCommand(status));
@@ -619,6 +636,16 @@ impl AACPManager {
         packet.push(size as u8);
         packet.push(0x00);
         packet.extend_from_slice(name_bytes);
+        self.send_data_packet(&packet).await
+    }
+    
+    pub async fn send_control_command(&self, identifier: ControlCommandIdentifiers, value: &[u8]) -> Result<()> {
+        let opcode = [opcodes::CONTROL_COMMAND, 0x00];
+        let mut data = vec![identifier as u8];
+        for i in 0..4 {
+            data.push(value.get(i).copied().unwrap_or(0));
+        }
+        let packet = [opcode.as_slice(), data.as_slice()].concat();
         self.send_data_packet(&packet).await
     }
 }
