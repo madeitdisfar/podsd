@@ -28,34 +28,63 @@ impl ksni::Tray for MyTray {
         "AirPods".into()
     }
     fn icon_pixmap(&self) -> Vec<Icon> {
-        // text to icon pixmap
         let text = if self.connected {
-            let min_battery = match (self.battery_l, self.battery_r) {
-                (Some(l), Some(r)) => Some(l.min(r)),
-                (Some(l), None) => Some(l),
-                (None, Some(r)) => Some(r),
-                (None, None) => None,
-            };
-            min_battery.map(|b| format!("{}", b)).unwrap_or("?".to_string())
+            let mut levels: Vec<u8> = Vec::new();
+            if let Some(l) = self.battery_l {
+                if self.battery_l_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
+                    levels.push(l);
+                }
+            }
+            if let Some(r) = self.battery_r {
+                if self.battery_r_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
+                    levels.push(r);
+                }
+            }
+            if let Some(c) = self.battery_c {
+                if self.battery_c_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
+                    levels.push(c);
+                }
+            }
+            let min_battery = levels.iter().min().copied();
+            if let Some(b) = min_battery {
+                format!("{}", b)
+            } else {
+                "?".to_string()
+            }
         } else {
-            "D".into()
+            "".into()
         };
-        let icon = generate_icon(&text, true);
+        let any_bud_charging = matches!(self.battery_l_status, Some(crate::bluetooth::aacp::BatteryStatus::Charging))
+            || matches!(self.battery_r_status, Some(crate::bluetooth::aacp::BatteryStatus::Charging));
+        let icon = generate_icon(&text, false, any_bud_charging);
         vec![icon]
     }
     fn tool_tip(&self) -> ToolTip {
         if self.connected {
-            let l = self.battery_l.map(|b| format!("L: {}%", b)).unwrap_or("L: ?".to_string());
-            let l_status = self.battery_l_status.map(|s| format!(" ({:?})", s)).unwrap_or("".to_string());
-            let r = self.battery_r.map(|b| format!("R: {}%", b)).unwrap_or("R: ?".to_string());
-            let r_status = self.battery_r_status.map(|s| format!(" ({:?})", s)).unwrap_or("".to_string());
-            let c = self.battery_c.map(|b| format!("C: {}%", b)).unwrap_or("C: ?".to_string());
-            let c_status = self.battery_c_status.map(|s| format!(" ({:?})", s)).unwrap_or("".to_string());
+            let format_component = |label: &str, level: Option<u8>, status: Option<crate::bluetooth::aacp::BatteryStatus>| -> String {
+                match status {
+                    Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) => format!("{}: -", label),
+                    _ => {
+                        let pct = level.map(|b| format!("{}%", b)).unwrap_or("?".to_string());
+                        let suffix = if status == Some(crate::bluetooth::aacp::BatteryStatus::Charging) {
+                            "⚡"
+                        } else {
+                            ""
+                        };
+                        format!("{}: {}{}", label, pct, suffix)
+                    }
+                }
+            };
+
+            let l = format_component("L", self.battery_l, self.battery_l_status);
+            let r = format_component("R", self.battery_r, self.battery_r_status);
+            let c = format_component("C", self.battery_c, self.battery_c_status);
+
             ToolTip {
                 icon_name: "".to_string(),
                 icon_pixmap: vec![],
                 title: "Battery Status".to_string(),
-                description: format!("{}{} {}{} {}{}", l, l_status, r, r_status, c, c_status),
+                description: format!("{} {} {}", l, r, c),
             }
         } else {
             ToolTip {
@@ -131,7 +160,7 @@ impl ksni::Tray for MyTray {
     }
 }
 
-fn generate_icon(text: &str, text_mode: bool) -> Icon {
+fn generate_icon(text: &str, text_mode: bool, charging: bool) -> Icon {
     use ab_glyph::{FontRef, PxScale};
     use image::{ImageBuffer, Rgba};
     use imageproc::drawing::draw_text_mut;
@@ -141,12 +170,19 @@ fn generate_icon(text: &str, text_mode: bool) -> Icon {
 
     let mut img = ImageBuffer::from_fn(width, height, |_, _| Rgba([0u8, 0u8, 0u8, 0u8]));
 
+    let font_data = include_bytes!("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
+    let font = match FontRef::try_from_slice(font_data) {
+        Ok(f) => f,
+        Err(_) => {
+            return Icon {
+                width: width as i32,
+                height: height as i32,
+                data: vec![0u8; (width * height * 4) as usize],
+            };
+        }
+    };
     if !text_mode {
-        let percentage = if text.ends_with('%') {
-            text.trim_end_matches('%').parse::<f32>().unwrap_or(0.0) / 100.0
-        } else {
-            0.0
-        };
+        let percentage = text.parse::<f32>().unwrap_or(0.0) / 100.0;
 
         let center_x = width as f32 / 2.0;
         let center_y = height as f32 / 2.0;
@@ -173,29 +209,35 @@ fn generate_icon(text: &str, text_mode: bool) -> Icon {
                 let dist = (dx * dx + dy * dy).sqrt();
                 if dist > inner_radius && dist <= outer_radius {
                     let angle = dy.atan2(dx);
-                    let angle_from_top = (std::f32::consts::PI / 2.0 - angle).rem_euclid(2.0 * std::f32::consts::PI);
+                    let angle_from_top = (angle + std::f32::consts::PI / 2.0).rem_euclid(2.0 * std::f32::consts::PI);
                     if angle_from_top <= percentage * 2.0 * std::f32::consts::PI {
                         img.put_pixel(x, y, Rgba([0u8, 255u8, 0u8, 255u8]));
                     }
                 }
             }
         }
+        if charging {
+            let emoji = "⚡";
+            let scale = PxScale::from(48.0);
+            let color = Rgba([0u8, 255u8, 0u8, 255u8]);
+            let scaled_font = font.as_scaled(scale);
+            let mut emoji_width = 0.0;
+            for c in emoji.chars() {
+                let glyph_id = font.glyph_id(c);
+                emoji_width += scaled_font.h_advance(glyph_id);
+            }
+            let x = ((width as f32 - emoji_width) / 2.0).max(0.0) as i32;
+            let y = ((height as f32 - scale.y) / 2.0).max(0.0) as i32;
+            draw_text_mut(&mut img, color, x, y, scale, &font, emoji);
+        }
     } else {
         // battery text
-        let font_data = include_bytes!("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf");
-        let font = match FontRef::try_from_slice(font_data) {
-            Ok(f) => f,
-            Err(_) => {
-                return Icon {
-                    width: width as i32,
-                    height: height as i32,
-                    data: vec![0u8; (width * height * 4) as usize],
-                };
-            }
-        };
-
         let scale = PxScale::from(48.0);
-        let color = Rgba([255u8, 255u8, 255u8, 255u8]);
+        let color = if charging {
+            Rgba([0u8, 255u8, 0u8, 255u8])
+        } else {
+            Rgba([255u8, 255u8, 255u8, 255u8])
+        };
 
         let scaled_font = font.as_scaled(scale);
         let mut text_width = 0.0;

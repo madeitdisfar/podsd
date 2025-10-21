@@ -113,12 +113,12 @@ impl AirPodsDevice {
                             for b in &battery_info {
                                 match b.component as u8 {
                                     0x02 => {
-                                        tray.battery_l = Some(b.level);
-                                        tray.battery_l_status = Some(b.status);
-                                    }
-                                    0x04 => {
                                         tray.battery_r = Some(b.level);
                                         tray.battery_r_status = Some(b.status);
+                                    }
+                                    0x04 => {
+                                        tray.battery_l = Some(b.level);
+                                        tray.battery_l_status = Some(b.status);
                                     }
                                     0x08 => {
                                         tray.battery_c = Some(b.level);
