@@ -36,11 +36,11 @@ impl ksni::Tray for MyTray {
                 (None, Some(r)) => Some(r),
                 (None, None) => None,
             };
-            min_battery.map(|b| format!("{}%", b)).unwrap_or("?".to_string())
+            min_battery.map(|b| format!("{}", b)).unwrap_or("?".to_string())
         } else {
             "D".into()
         };
-        let icon = icon_from_text(&text, true);
+        let icon = generate_icon(&text, true);
         vec![icon]
     }
     fn tool_tip(&self) -> ToolTip {
@@ -129,7 +129,7 @@ impl ksni::Tray for MyTray {
     }
 }
 
-fn icon_from_text(text: &str, text_mode: bool) -> Icon {
+fn generate_icon(text: &str, text_mode: bool) -> Icon {
     use ab_glyph::{FontRef, PxScale};
     use image::{ImageBuffer, Rgba};
     use imageproc::drawing::draw_text_mut;
@@ -192,7 +192,7 @@ fn icon_from_text(text: &str, text_mode: bool) -> Icon {
             }
         };
 
-        let scale = PxScale::from(28.0);
+        let scale = PxScale::from(48.0);
         let color = Rgba([255u8, 255u8, 255u8, 255u8]);
 
         let scaled_font = font.as_scaled(scale);
