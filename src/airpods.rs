@@ -18,7 +18,7 @@ pub struct AirPodsDevice {
 }
 
 impl AirPodsDevice {
-    pub async fn new(mac_address: Address, tray_handle: Handle<MyTray>) -> Self {
+    pub async fn new(mac_address: Address, tray_handle: Option<Handle<MyTray>>) -> Self {
         info!("Creating new AirPodsDevice for {}", mac_address);
         let mut aacp_manager = AACPManager::new();
         aacp_manager.connect(mac_address).await;
@@ -26,7 +26,9 @@ impl AirPodsDevice {
         // let mut att_manager = ATTManager::new();
         // att_manager.connect(mac_address).await.expect("Failed to connect ATT");
 
-        tray_handle.update(|tray: &mut MyTray| tray.connected = true).await;
+        if let Some(handle) = &tray_handle {
+            handle.update(|tray: &mut MyTray| tray.connected = true).await;
+        }
 
         info!("Sending handshake");
         aacp_manager.send_handshake().await.expect(
@@ -69,7 +71,9 @@ impl AirPodsDevice {
         let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
 
         aacp_manager.set_event_channel(tx).await;
-        tray_handle.update(|tray: &mut MyTray| tray.command_tx = Some(command_tx.clone())).await;
+        if let Some(handle) = &tray_handle {
+            handle.update(|tray: &mut MyTray| tray.command_tx = Some(command_tx.clone())).await;
+        }
 
         let aacp_manager_clone = aacp_manager.clone();
         tokio::spawn(async move {
@@ -90,9 +94,11 @@ impl AirPodsDevice {
         let tray_handle_clone = tray_handle.clone();
         tokio::spawn(async move {
             while let Some(value) = listening_mode_rx.recv().await {
-                tray_handle_clone.update(|tray: &mut MyTray| {
-                    tray.listening_mode = Some(value[0]);
-                }).await;
+                if let Some(handle) = &tray_handle_clone {
+                    handle.update(|tray: &mut MyTray| {
+                        tray.listening_mode = Some(value[0]);
+                    }).await;
+                }
             }
         });
 
@@ -101,9 +107,11 @@ impl AirPodsDevice {
         let tray_handle_clone = tray_handle.clone();
         tokio::spawn(async move {
             while let Some(value) = allow_off_rx.recv().await {
-                tray_handle_clone.update(|tray: &mut MyTray| {
-                    tray.allow_off_option = Some(value[0]);
-                }).await;
+                if let Some(handle) = &tray_handle_clone {
+                    handle.update(|tray: &mut MyTray| {
+                        tray.allow_off_option = Some(value[0]);
+                    }).await;
+                }
             }
         });
 
@@ -112,9 +120,11 @@ impl AirPodsDevice {
         let tray_handle_clone = tray_handle.clone();
         tokio::spawn(async move {
             while let Some(value) = conversation_detect_rx.recv().await {
-                tray_handle_clone.update(|tray: &mut MyTray| {
-                    tray.conversation_detect_enabled = Some(value[0] == 0x01);
-                }).await;
+                if let Some(handle) = &tray_handle_clone {
+                    handle.update(|tray: &mut MyTray| {
+                        tray.conversation_detect_enabled = Some(value[0] == 0x01);
+                    }).await;
+                }
             }
         });
 
@@ -146,25 +156,27 @@ impl AirPodsDevice {
                     }
                     AACPEvent::BatteryInfo(battery_info) => {
                         debug!("Received BatteryInfo event: {:?}", battery_info);
-                        tray_handle.update(|tray: &mut MyTray| {
-                            for b in &battery_info {
-                                match b.component as u8 {
-                                    0x02 => {
-                                        tray.battery_r = Some(b.level);
-                                        tray.battery_r_status = Some(b.status);
+                        if let Some(handle) = &tray_handle {
+                            handle.update(|tray: &mut MyTray| {
+                                for b in &battery_info {
+                                    match b.component as u8 {
+                                        0x02 => {
+                                            tray.battery_r = Some(b.level);
+                                            tray.battery_r_status = Some(b.status);
+                                        }
+                                        0x04 => {
+                                            tray.battery_l = Some(b.level);
+                                            tray.battery_l_status = Some(b.status);
+                                        }
+                                        0x08 => {
+                                            tray.battery_c = Some(b.level);
+                                            tray.battery_c_status = Some(b.status);
+                                        }
+                                        _ => {}
                                     }
-                                    0x04 => {
-                                        tray.battery_l = Some(b.level);
-                                        tray.battery_l_status = Some(b.status);
-                                    }
-                                    0x08 => {
-                                        tray.battery_c = Some(b.level);
-                                        tray.battery_c_status = Some(b.status);
-                                    }
-                                    _ => {}
                                 }
-                            }
-                        }).await;
+                            }).await;
+                        }
                         debug!("Updated tray with new battery info");
                     }
                     AACPEvent::ControlCommand(status) => {
