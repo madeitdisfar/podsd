@@ -19,6 +19,7 @@ use libpulse_binding::proplist::Proplist;
 use libpulse_binding::{
     volume::{ChannelVolumes, Volume},
 };
+use crate::bluetooth::aacp::AACPManager;
 
 #[derive(Clone)]
 struct OwnedCardProfileInfo {
@@ -41,6 +42,7 @@ struct OwnedSinkInfo {
 
 struct MediaControllerState {
     connected_device_mac: String,
+    local_mac: String,
     is_playing: bool,
     paused_by_app_services: Vec<String>,
     device_index: Option<u32>,
@@ -52,12 +54,14 @@ struct MediaControllerState {
     disconnect_when_not_wearing: bool,
     conv_original_volume: Option<u32>,
     conv_conversation_started: bool,
+    playback_listener_running: bool,
 }
 
 impl MediaControllerState {
     fn new() -> Self {
         MediaControllerState {
             connected_device_mac: String::new(),
+            local_mac: String::new(),
             is_playing: false,
             paused_by_app_services: Vec::new(),
             device_index: None,
@@ -69,6 +73,7 @@ impl MediaControllerState {
             disconnect_when_not_wearing: true,
             conv_original_volume: None,
             conv_conversation_started: false,
+            playback_listener_running: false,
         }
     }
 }
@@ -79,12 +84,102 @@ pub struct MediaController {
 }
 
 impl MediaController {
-    pub fn new(connected_mac: String) -> Self {
+    pub fn new(connected_mac: String, local_mac: String) -> Self {
         let mut state = MediaControllerState::new();
         state.connected_device_mac = connected_mac;
+        state.local_mac = local_mac;
         MediaController {
             state: Arc::new(Mutex::new(state)),
         }
+    }
+
+    pub async fn start_playback_listener(&self, aacp_manager: AACPManager, control_tx: tokio::sync::mpsc::UnboundedSender<(crate::bluetooth::aacp::ControlCommandIdentifiers, Vec<u8>)>) {
+        let mut state = self.state.lock().await;
+        if state.playback_listener_running {
+            debug!("Playback listener already running");
+            return;
+        }
+        state.playback_listener_running = true;
+        drop(state);
+
+        let controller_clone = self.clone();
+        tokio::spawn(async move {
+            controller_clone.playback_listener_loop(aacp_manager, control_tx).await;
+        });
+    }
+
+    async fn playback_listener_loop(&self, aacp_manager: AACPManager, control_tx: tokio::sync::mpsc::UnboundedSender<(crate::bluetooth::aacp::ControlCommandIdentifiers, Vec<u8>)>) {
+        info!("Starting playback listener loop");
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            
+            let is_playing = tokio::task::spawn_blocking(|| {
+                Self::check_if_playing()
+            }).await.unwrap_or(false);
+
+            let mut state = self.state.lock().await;
+            let was_playing = state.is_playing;
+            state.is_playing = is_playing;
+            let local_mac = state.local_mac.clone();
+            drop(state);
+
+            if !was_playing && is_playing {
+                info!("Media playback started, taking ownership and activating a2dp");
+                let _ = control_tx.send((crate::bluetooth::aacp::ControlCommandIdentifiers::OwnsConnection, vec![0x01]));
+                self.activate_a2dp_profile().await;
+
+                info!("already connected locally, hijacking connection by asking AirPods");
+
+                let connected_devices = aacp_manager.get_connected_devices().await;
+                for device in connected_devices {
+                    if device.mac != local_mac {
+                        if let Err(e) = aacp_manager.send_media_information(&local_mac, &device.mac, true).await {
+                            error!("Failed to send media information to {}: {}", device.mac, e);
+                        }
+                        if let Err(e) = aacp_manager.send_smart_routing_show_ui(&device.mac).await {
+                            error!("Failed to send smart routing show ui to {}: {}", device.mac, e);
+                        }
+                        if let Err(e) = aacp_manager.send_hijack_request(&device.mac).await {
+                            error!("Failed to send hijack request to {}: {}", device.mac, e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_if_playing() -> bool {
+        let conn = match Connection::new_session() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        
+        let proxy = conn.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", Duration::from_secs(5));
+        let (names,): (Vec<String>,) = match proxy.method_call("org.freedesktop.DBus", "ListNames", ()) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+
+        for service in names {
+            if !service.starts_with("org.mpris.MediaPlayer2.") {
+                continue;
+            }
+            if Self::is_kdeconnect_service(&service) {
+                continue;
+            }
+            
+            let proxy = conn.with_proxy(&service, "/org/mpris/MediaPlayer2", Duration::from_secs(5));
+            if let Ok(playback_status) = proxy.get::<String>("org.mpris.MediaPlayer2.Player", "PlaybackStatus") {
+                if playback_status == "Playing" {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn is_kdeconnect_service(service: &str) -> bool {
+        service.starts_with("org.mpris.MediaPlayer2.kdeconnect.mpris_")
     }
 
     pub async fn handle_ear_detection(&self, old_statuses: Vec<EarDetectionStatus>, new_statuses: Vec<EarDetectionStatus>) {
@@ -262,19 +357,25 @@ impl MediaController {
             let mut paused_services = Vec::new();
 
             for service in names {
-                if service.starts_with("org.mpris.MediaPlayer2.") {
-                    debug!("Checking playback status for service: {}", service);
-                    let proxy = conn.with_proxy(&service, "/org/mpris/MediaPlayer2", Duration::from_secs(5));
-                    if let Ok(playback_status) = proxy.get::<String>("org.mpris.MediaPlayer2.Player", "PlaybackStatus") {
-                        if playback_status == "Playing" {
-                            debug!("Service {} is playing, attempting to pause", service);
-                            if proxy.method_call::<(), _, &str, &str>("org.mpris.MediaPlayer2.Player", "Pause", ()).is_ok() {
-                                info!("Paused playback for: {}", service);
-                                paused_services.push(service);
-                            } else {
-                                debug!("Failed to pause service: {}", service);
-                                error!("Failed to pause {}", service);
-                            }
+                if !service.starts_with("org.mpris.MediaPlayer2.") {
+                    continue;
+                }
+                if Self::is_kdeconnect_service(&service) {
+                    debug!("Skipping kdeconnect service: {}", service);
+                    continue;
+                }
+                
+                debug!("Checking playback status for service: {}", service);
+                let proxy = conn.with_proxy(&service, "/org/mpris/MediaPlayer2", Duration::from_secs(5));
+                if let Ok(playback_status) = proxy.get::<String>("org.mpris.MediaPlayer2.Player", "PlaybackStatus") {
+                    if playback_status == "Playing" {
+                        debug!("Service {} is playing, attempting to pause", service);
+                        if proxy.method_call::<(), _, &str, &str>("org.mpris.MediaPlayer2.Player", "Pause", ()).is_ok() {
+                            info!("Paused playback for: {}", service);
+                            paused_services.push(service);
+                        } else {
+                            debug!("Failed to pause service: {}", service);
+                            error!("Failed to pause {}", service);
                         }
                     }
                 }
@@ -287,9 +388,56 @@ impl MediaController {
             info!("Paused {} media player(s) via DBus", paused_services.len());
             let mut state = self.state.lock().await;
             state.paused_by_app_services = paused_services;
+            state.is_playing = false;
         } else {
             debug!("No playing media players found");
             info!("No playing media players found to pause");
+        }
+    }
+
+    pub async fn pause_all_media(&self) {
+        debug!("Pausing all media (without tracking for resume)");
+
+        let paused_count = tokio::task::spawn_blocking(|| {
+            debug!("Listing DBus names for media players");
+            let conn = Connection::new_session().unwrap();
+            let proxy = conn.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", Duration::from_secs(5));
+            let (names,): (Vec<String>,) = proxy.method_call("org.freedesktop.DBus", "ListNames", ()).unwrap();
+            let mut paused_count = 0;
+
+            for service in names {
+                if !service.starts_with("org.mpris.MediaPlayer2.") {
+                    continue;
+                }
+                if Self::is_kdeconnect_service(&service) {
+                    debug!("Skipping kdeconnect service: {}", service);
+                    continue;
+                }
+                
+                debug!("Checking playback status for service: {}", service);
+                let proxy = conn.with_proxy(&service, "/org/mpris/MediaPlayer2", Duration::from_secs(5));
+                if let Ok(playback_status) = proxy.get::<String>("org.mpris.MediaPlayer2.Player", "PlaybackStatus") {
+                    if playback_status == "Playing" {
+                        debug!("Service {} is playing, attempting to pause", service);
+                        if proxy.method_call::<(), _, &str, &str>("org.mpris.MediaPlayer2.Player", "Pause", ()).is_ok() {
+                            info!("Paused playback for: {}", service);
+                            paused_count += 1;
+                        } else {
+                            debug!("Failed to pause service: {}", service);
+                            error!("Failed to pause {}", service);
+                        }
+                    }
+                }
+            }
+            paused_count
+        }).await.unwrap();
+
+        if paused_count > 0 {
+            info!("Paused {} media player(s) due to ownership loss", paused_count);
+            let mut state = self.state.lock().await;
+            state.is_playing = false;
+        } else {
+            debug!("No playing media players found to pause");
         }
     }
 
@@ -310,6 +458,11 @@ impl MediaController {
             let conn = Connection::new_session().unwrap();
             let mut resumed_count = 0;
             for service in services {
+                if Self::is_kdeconnect_service(&service) {
+                    debug!("Skipping kdeconnect service: {}", service);
+                    continue;
+                }
+                
                 debug!("Attempting to resume service: {}", service);
                 let proxy = conn.with_proxy(&service, "/org/mpris/MediaPlayer2", Duration::from_secs(5));
                 if proxy.method_call::<(), _, &str, &str>("org.mpris.MediaPlayer2.Player", "Play", ()).is_ok() {
@@ -454,7 +607,7 @@ impl MediaController {
                 }
             }
 
-            let introspector = context.introspect();
+            let mut introspector = context.introspect();
             let card_info_list = Rc::new(RefCell::new(None));
             let op = introspector.get_card_info_list({
                 let card_info_list = card_info_list.clone();

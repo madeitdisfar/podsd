@@ -19,7 +19,7 @@ use crate::ui::tray::MyTray;
 #[tokio::main]
 async fn main() -> bluer::Result<()> {
     if env::var("RUST_LOG").is_err() {
-        unsafe { env::set_var("RUST_LOG", "info"); }
+        unsafe { env::set_var("RUST_LOG", "debug"); }
     }
 
     env_logger::init();

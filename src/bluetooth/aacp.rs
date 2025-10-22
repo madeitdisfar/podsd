@@ -30,6 +30,8 @@ pub mod opcodes {
     pub const SMART_ROUTING: u8 = 0x10;
     pub const SMART_ROUTING_RESP: u8 = 0x11;
     pub const SEND_CONNECTED_MAC: u8 = 0x14;
+    pub const HEADTRACKING: u8 = 0x17;
+    pub const TIPI_3: u8 = 0x0C;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -217,7 +219,8 @@ pub enum AACPEvent {
     ConversationalAwareness(u8),
     ProximityKeys(Vec<(u8, Vec<u8>)>),
     AudioSource(AudioSource),
-    ConnectedDevices(Vec<ConnectedDevice>),
+    ConnectedDevices(Vec<ConnectedDevice>, Vec<ConnectedDevice>),
+    OwnershipToFalseRequest,
 }
 
 struct AACPManagerState {
@@ -225,6 +228,7 @@ struct AACPManagerState {
     control_command_status_list: Vec<ControlCommandStatus>,
     control_command_subscribers: HashMap<ControlCommandIdentifiers, Vec<mpsc::UnboundedSender<Vec<u8>>>>,
     owns: bool,
+    old_connected_devices: Vec<ConnectedDevice>,
     connected_devices: Vec<ConnectedDevice>,
     audio_source: Option<AudioSource>,
     battery_info: Vec<BatteryInfo>,
@@ -241,6 +245,7 @@ impl AACPManagerState {
             control_command_status_list: Vec::new(),
             control_command_subscribers: HashMap::new(),
             owns: false,
+            old_connected_devices: Vec::new(),
             connected_devices: Vec::new(),
             audio_source: None,
             battery_info: Vec::new(),
@@ -353,6 +358,10 @@ impl AACPManager {
     pub async fn set_event_channel(&self, tx: mpsc::UnboundedSender<AACPEvent>) {
         let mut state = self.state.lock().await;
         state.event_tx = Some(tx);
+    }
+
+    pub async fn get_connected_devices(&self) -> Vec<ConnectedDevice> {
+        self.state.lock().await.connected_devices.clone()
     }
 
     pub async fn subscribe_to_control_command(&self, identifier: ControlCommandIdentifiers, tx: mpsc::UnboundedSender<Vec<u8>>) {
@@ -578,14 +587,22 @@ impl AACPManager {
                     devices.push(ConnectedDevice { mac, info1, info2, r#type: None });
                 }
                 let mut state = self.state.lock().await;
+                state.old_connected_devices = state.connected_devices.clone();
                 state.connected_devices = devices.clone();
                 if let Some(ref tx) = state.event_tx {
-                    let _ = tx.send(AACPEvent::ConnectedDevices(devices));
+                    let _ = tx.send(AACPEvent::ConnectedDevices(state.old_connected_devices.clone(), devices));
                 }
                 info!("Received Connected Devices: {:?}", state.connected_devices);
             }
             opcodes::SMART_ROUTING_RESP => {
-                info!("Received Smart Routing Response: {:?}", &payload[1..]);
+                let packet_string = String::from_utf8_lossy(&payload[2..]);
+                info!("Received Smart Routing Response: {}", packet_string);
+                if packet_string.contains("SetOwnershipToFalse") {
+                    info!("Received OwnershipToFalse request");
+                    if let Some(ref tx) = self.state.lock().await.event_tx {
+                        let _ = tx.send(AACPEvent::OwnershipToFalseRequest);
+                    }
+                }
             }
             opcodes::EQ_DATA => {
                  debug!("Received EQ Data");
@@ -648,6 +665,195 @@ impl AACPManager {
         let packet = [opcode.as_slice(), data.as_slice()].concat();
         self.send_data_packet(&packet).await
     }
+
+    pub async fn send_media_information_new_device(&self, self_mac_address: &str, target_mac_address: &str) -> Result<()> {
+        let opcode = [opcodes::SMART_ROUTING, 0x00];
+        let mut buffer = Vec::with_capacity(112);
+        let target_mac_bytes: Vec<u8> = target_mac_address.split(':').map(|s| u8::from_str_radix(s, 16).unwrap()).collect();
+        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
+
+        buffer.extend_from_slice(&[0x68, 0x00]);
+        buffer.extend_from_slice(&[0x01, 0xE5, 0x4A]);
+        buffer.extend_from_slice(b"playingApp");
+        buffer.push(0x42);
+        buffer.extend_from_slice(b"NA");;
+        buffer.push(0x52);
+        buffer.extend_from_slice(b"hostStreamingState");
+        buffer.push(0x42);
+        buffer.extend_from_slice(b"NO");;
+        buffer.push(0x49);
+        buffer.extend_from_slice(b"btAddress");
+        buffer.push(0x51);
+        buffer.extend_from_slice(self_mac_address.as_bytes());
+        buffer.push(0x46);
+        buffer.extend_from_slice(b"btName");
+        buffer.push(0x43);
+        buffer.extend_from_slice(b"Mac");;
+        buffer.push(0x58);
+        buffer.extend_from_slice(b"otherDevice");
+        buffer.extend_from_slice(b"AudioCategory");
+        buffer.extend_from_slice(&[0x30, 0x64]);
+
+        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_hijack_request(&self, target_mac_address: &str) -> Result<()> {
+        let opcode = [opcodes::SMART_ROUTING, 0x00];
+        let mut buffer = Vec::with_capacity(106);
+        let target_mac_bytes: Vec<u8> = target_mac_address.split(':').map(|s| u8::from_str_radix(s, 16).unwrap()).collect();
+        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
+        buffer.extend_from_slice(&[0x62, 0x00]);
+        buffer.extend_from_slice(&[0x01, 0xE5]);
+        buffer.push(0x4A);
+        buffer.extend_from_slice(b"localscore");
+        buffer.extend_from_slice(&[0x30, 0x64]);
+        buffer.push(0x46);
+        buffer.extend_from_slice(b"reason");
+        buffer.push(0x48);
+        buffer.extend_from_slice(b"Hijackv2");
+        buffer.push(0x51);
+        buffer.extend_from_slice(b"audioRoutingScore");
+        buffer.extend_from_slice(&[0x31, 0x2D, 0x01, 0x5F]);
+        buffer.extend_from_slice(b"audioRoutingSetOwnershipToFalse");
+        buffer.push(0x01);
+        buffer.push(0x4B);
+        buffer.extend_from_slice(b"remotescore");
+        buffer.push(0xA5);
+
+        while buffer.len() < 106 {
+            buffer.push(0x00);
+        }
+
+        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_media_information(&self, self_mac_address: &str, target_mac_address: &str, streaming_state: bool) -> Result<()> {
+        let opcode = [opcodes::SMART_ROUTING, 0x00];
+        let mut buffer = Vec::with_capacity(138);
+        let target_mac_bytes: Vec<u8> = target_mac_address.split(':').map(|s| u8::from_str_radix(s, 16).unwrap()).collect();
+        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
+        buffer.extend_from_slice(&[0x82, 0x00]);
+        buffer.extend_from_slice(&[0x01, 0xE5, 0x4A]);
+        buffer.extend_from_slice(b"PlayingApp");
+        buffer.push(0x56);
+        buffer.extend_from_slice(b"com.google.ios.youtube");
+        buffer.push(0x52);
+        buffer.extend_from_slice(b"HostStreamingState");
+        buffer.push(0x42);
+        buffer.extend_from_slice(if streaming_state { b"YES" } else { b"NO" });
+        buffer.push(0x49);
+        buffer.extend_from_slice(b"btAddress");
+        buffer.push(0x51);
+        buffer.extend_from_slice(self_mac_address.as_bytes());
+        buffer.extend_from_slice(b"btName");
+        buffer.push(0x43);
+        buffer.extend_from_slice(b"Mac");
+        buffer.push(0x58);
+        buffer.extend_from_slice(b"otherDevice");
+        buffer.extend_from_slice(b"AudioCategory");
+        buffer.extend_from_slice(&[0x31, 0x2D, 0x01]);
+
+        while buffer.len() < 138 {
+            buffer.push(0x00);
+        }
+        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_smart_routing_show_ui(&self, target_mac_address: &str) -> Result<()> {
+        let opcode = [opcodes::SMART_ROUTING, 0x00];
+        let mut buffer = Vec::with_capacity(134);
+        let target_mac_bytes: Vec<u8> = target_mac_address.split(':').map(|s| u8::from_str_radix(s, 16).unwrap()).collect();
+        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
+        buffer.extend_from_slice(&[0x7E, 0x00]);
+        buffer.extend_from_slice(&[0x01, 0xE6, 0x5B]);
+        buffer.extend_from_slice(b"SmartRoutingKeyShowNearbyUI");
+        buffer.push(0x01);
+        buffer.push(0x4A);
+        buffer.extend_from_slice(b"localscore");
+        buffer.extend_from_slice(&[0x31, 0x2D]);
+        buffer.push(0x01);
+        buffer.push(0x46);
+        buffer.extend_from_slice(b"reasonHhijackv2");
+        buffer.push(0x51);
+        buffer.extend_from_slice(b"audioRoutingScore");
+        buffer.push(0xA2);
+        buffer.push(0x5F);
+        buffer.extend_from_slice(b"audioRoutingSetOwnershipToFalse");
+        buffer.push(0x01);
+        buffer.push(0x4B);
+        buffer.extend_from_slice(b"remotescore");
+        buffer.push(0xA2);
+
+        while buffer.len() < 134 {
+            buffer.push(0x00);
+        }
+
+        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_hijack_reversed(&self, target_mac_address: &str) -> Result<()> {
+        let opcode = [opcodes::SMART_ROUTING, 0x00];
+        let mut buffer = Vec::with_capacity(97);
+        let target_mac_bytes: Vec<u8> = target_mac_address.split(':').map(|s| u8::from_str_radix(s, 16).unwrap()).collect();
+        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
+        buffer.extend_from_slice(&[0x59, 0x00]);
+        buffer.extend_from_slice(&[0x01, 0xE3]);
+        buffer.push(0x5F);
+        buffer.extend_from_slice(b"audioRoutingSetOwnershipToFalse");
+        buffer.push(0x01);
+        buffer.push(0x59);
+        buffer.extend_from_slice(b"audioRoutingShowReverseUI");
+        buffer.push(0x01);
+        buffer.push(0x46);
+        buffer.extend_from_slice(b"reason");
+        buffer.push(0x53);
+        buffer.extend_from_slice(b"ReverseBannerTapped");
+
+        while buffer.len() < 97 {
+            buffer.push(0x00);
+        }
+
+        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_add_tipi_device(&self, self_mac_address: &str, target_mac_address: &str) -> Result<()> {
+        let opcode = [opcodes::SMART_ROUTING, 0x00];
+        let mut buffer = Vec::with_capacity(86);
+        let target_mac_bytes: Vec<u8> = target_mac_address.split(':').map(|s| u8::from_str_radix(s, 16).unwrap()).collect();
+        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
+        buffer.extend_from_slice(&[0x4E, 0x00]);
+        buffer.extend_from_slice(&[0x01, 0xE5]);
+        buffer.extend_from_slice(&[0x48, 0x69]);
+        buffer.extend_from_slice(b"idleTime");
+        buffer.extend_from_slice(&[0x08, 0x47]);
+        buffer.extend_from_slice(b"newTipi");
+        buffer.extend_from_slice(&[0x01, 0x49]);
+        buffer.extend_from_slice(b"btAddress");
+        buffer.push(0x51);
+        buffer.extend_from_slice(self_mac_address.as_bytes());
+        buffer.push(0x46);
+        buffer.extend_from_slice(b"btName");
+        buffer.push(0x43);
+        buffer.extend_from_slice(b"Mac");
+        buffer.push(0x50);
+        buffer.extend_from_slice(b"nearbyAudioScore");
+        buffer.push(0x0E);
+
+        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    pub async fn send_some_packet(&self) -> Result<()> {
+        self.send_data_packet(&[
+            0x29, 0x00,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+        ]).await
+    }
 }
 
 async fn recv_thread(manager: AACPManager, sp: Arc<SeqPacket>) {
@@ -665,6 +871,11 @@ async fn recv_thread(manager: AACPManager, sp: Arc<SeqPacket>) {
             }
             Err(e) => {
                 error!("Read error: {}", e);
+                debug!("We have probably disconnected, clearing state variables (owns=false, connected_devices=empty, control_command_status_list=empty).");
+                let mut state = manager.state.lock().await;
+                state.owns = false;
+                state.connected_devices.clear();
+                state.control_command_status_list.clear();
                 break;
             }
         }
