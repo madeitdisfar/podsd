@@ -31,35 +31,35 @@ impl AirPodsDevice {
         }
 
         info!("Sending handshake");
-        aacp_manager.send_handshake().await.expect(
-            "Failed to send handshake to AirPods device",
-        );
+        if let Err(e) = aacp_manager.send_handshake().await {
+            error!("Failed to send handshake to AirPods device: {}", e);
+        }
 
         sleep(Duration::from_millis(100)).await;
 
         info!("Setting feature flags");
-        aacp_manager.send_set_feature_flags_packet().await.expect(
-            "Failed to set feature flags",
-        );
+        if let Err(e) = aacp_manager.send_set_feature_flags_packet().await {
+            error!("Failed to set feature flags: {}", e);
+        }
 
         sleep(Duration::from_millis(100)).await;
 
         info!("Requesting notifications");
-        aacp_manager.send_notification_request().await.expect(
-            "Failed to request notifications",
-        );
+        if let Err(e) = aacp_manager.send_notification_request().await {
+            error!("Failed to request notifications: {}", e);
+        }
 
         info!("sending some packet");
-        aacp_manager.send_some_packet().await.expect(
-            "Failed to send some packet",
-        );
+        if let Err(e) = aacp_manager.send_some_packet().await {
+            error!("Failed to send some packet: {}", e);
+        }
 
         info!("Requesting Proximity Keys: IRK and ENC_KEY");
-        aacp_manager.send_proximity_keys_request(
+        if let Err(e) = aacp_manager.send_proximity_keys_request(
             vec![ProximityKeyType::Irk, ProximityKeyType::EncKey],
-        ).await.expect(
-            "Failed to request proximity keys",
-        );
+        ).await {
+            error!("Failed to request proximity keys: {}", e);
+        }
 
         let session = bluer::Session::new().await.expect("Failed to get bluer session");
         let adapter = session.default_adapter().await.expect("Failed to get default adapter");

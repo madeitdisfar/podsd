@@ -24,7 +24,4 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
-
-[profile.release-stripped]
-inherits = "release"
 strip = true
