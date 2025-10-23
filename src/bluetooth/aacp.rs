@@ -8,11 +8,18 @@ use tokio::time::{sleep, Instant};
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::path::PathBuf;
 
 const PSM: u16 = 0x1001;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEADER_BYTES: [u8; 4] = [0x04, 0x00, 0x04, 0x00];
+
+fn get_proximity_keys_path() -> PathBuf {
+    let data_dir = std::env::var("XDG_DATA_HOME")
+        .unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
+    PathBuf::from(data_dir).join("librepods").join("proximity_keys.json")
+}
 
 pub mod opcodes {
     pub const SET_FEATURE_FLAGS: u8 = 0x4D;
@@ -253,7 +260,7 @@ struct AACPManagerState {
 
 impl AACPManagerState {
     fn new() -> Self {
-        let proximity_keys = std::fs::read_to_string("proximity_keys.json")
+        let proximity_keys = std::fs::read_to_string(get_proximity_keys_path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -565,9 +572,16 @@ impl AACPManager {
                         state.proximity_keys.insert(kt, key_data.clone());
                     }
                 }
-                // Persist to file
+
                 let json = serde_json::to_string(&state.proximity_keys).unwrap();
-                if let Err(e) = tokio::fs::write("proximity_keys.json", json).await {
+                let path = get_proximity_keys_path();
+                if let Some(parent) = path.parent() {
+                    if let Err(e) = tokio::fs::create_dir_all(&parent).await {
+                        error!("Failed to create directory for proximity keys: {}", e);
+                        return;
+                    }
+                }
+                if let Err(e) = tokio::fs::write(&path, json).await {
                     error!("Failed to save proximity keys: {}", e);
                 }
                 if let Some(ref tx) = state.event_tx {

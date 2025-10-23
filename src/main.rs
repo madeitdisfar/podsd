@@ -16,6 +16,7 @@ use bluer::Address;
 use ksni::TrayMethods;
 use crate::ui::tray::MyTray;
 use clap::Parser;
+use crate::bluetooth::le::start_le_monitor;
 
 #[derive(Parser)]
 struct Args {
@@ -58,6 +59,14 @@ async fn main() -> bluer::Result<()> {
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
+    // Start LE monitor for Apple devices
+    tokio::spawn(async {
+        info!("Starting LE monitor...");
+        if let Err(e) = start_le_monitor().await {
+            log::error!("LE monitor error: {}", e);
+        }
+    });
+
     info!("Listening for new connections.");
 
     info!("Checking for connected devices...");
@@ -79,7 +88,7 @@ async fn main() -> bluer::Result<()> {
         if !path.contains("/org/bluez/hci") || !path.contains("/dev_") {
             return true;
         }
-        debug!("PropertiesChanged signal for path: {}", path);
+        // debug!("PropertiesChanged signal for path: {}", path);
         let Ok((iface, changed, _)) = msg.read3::<String, HashMap<String, Variant<Box<dyn RefArg>>>, Vec<String>>() else {
             return true;
         };
