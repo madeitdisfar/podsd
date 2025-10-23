@@ -28,7 +28,7 @@ impl ksni::Tray for MyTray {
         "AirPods".into()
     }
     fn icon_pixmap(&self) -> Vec<Icon> {
-        let text = if self.connected {
+        let text = {
             let mut levels: Vec<u8> = Vec::new();
             if let Some(l) = self.battery_l {
                 if self.battery_l_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
@@ -40,19 +40,17 @@ impl ksni::Tray for MyTray {
                     levels.push(r);
                 }
             }
-            if let Some(c) = self.battery_c {
-                if self.battery_c_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
-                    levels.push(c);
-                }
-            }
+            // if let Some(c) = self.battery_c {
+            //     if self.battery_c_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
+            //         levels.push(c);
+            //     }
+            // }
             let min_battery = levels.iter().min().copied();
             if let Some(b) = min_battery {
                 format!("{}", b)
             } else {
                 "?".to_string()
             }
-        } else {
-            "".into()
         };
         let any_bud_charging = matches!(self.battery_l_status, Some(crate::bluetooth::aacp::BatteryStatus::Charging))
             || matches!(self.battery_r_status, Some(crate::bluetooth::aacp::BatteryStatus::Charging));
@@ -60,39 +58,30 @@ impl ksni::Tray for MyTray {
         vec![icon]
     }
     fn tool_tip(&self) -> ToolTip {
-        if self.connected {
-            let format_component = |label: &str, level: Option<u8>, status: Option<crate::bluetooth::aacp::BatteryStatus>| -> String {
-                match status {
-                    Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) => format!("{}: -", label),
-                    _ => {
-                        let pct = level.map(|b| format!("{}%", b)).unwrap_or("?".to_string());
-                        let suffix = if status == Some(crate::bluetooth::aacp::BatteryStatus::Charging) {
-                            "⚡"
-                        } else {
-                            ""
-                        };
-                        format!("{}: {}{}", label, pct, suffix)
-                    }
+        let format_component = |label: &str, level: Option<u8>, status: Option<crate::bluetooth::aacp::BatteryStatus>| -> String {
+            match status {
+                Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) => format!("{}: -", label),
+                _ => {
+                    let pct = level.map(|b| format!("{}%", b)).unwrap_or("?".to_string());
+                    let suffix = if status == Some(crate::bluetooth::aacp::BatteryStatus::Charging) {
+                        "⚡"
+                    } else {
+                        ""
+                    };
+                    format!("{}: {}{}", label, pct, suffix)
                 }
-            };
-
-            let l = format_component("L", self.battery_l, self.battery_l_status);
-            let r = format_component("R", self.battery_r, self.battery_r_status);
-            let c = format_component("C", self.battery_c, self.battery_c_status);
-
-            ToolTip {
-                icon_name: "".to_string(),
-                icon_pixmap: vec![],
-                title: "Battery Status".to_string(),
-                description: format!("{} {} {}", l, r, c),
             }
-        } else {
-            ToolTip {
-                icon_name: "".to_string(),
-                icon_pixmap: vec![],
-                title: "Not Connected".to_string(),
-                description: "Device is not connected.".to_string(),
-            }
+        };
+
+        let l = format_component("L", self.battery_l, self.battery_l_status);
+        let r = format_component("R", self.battery_r, self.battery_r_status);
+        let c = format_component("C", self.battery_c, self.battery_c_status);
+
+        ToolTip {
+            icon_name: "".to_string(),
+            icon_pixmap: vec![],
+            title: "Battery Status".to_string(),
+            description: format!("{} {} {}", l, r, c),
         }
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {

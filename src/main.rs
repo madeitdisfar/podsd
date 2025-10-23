@@ -59,10 +59,10 @@ async fn main() -> bluer::Result<()> {
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
-    // Start LE monitor for Apple devices
-    tokio::spawn(async {
+    let le_tray_clone = tray_handle.clone();
+    tokio::spawn(async move {
         info!("Starting LE monitor...");
-        if let Err(e) = start_le_monitor().await {
+        if let Err(e) = start_le_monitor(le_tray_clone).await {
             log::error!("LE monitor error: {}", e);
         }
     });

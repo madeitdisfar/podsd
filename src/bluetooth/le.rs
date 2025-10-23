@@ -11,6 +11,8 @@ use futures::StreamExt;
 use hex;
 use std::time::Duration;
 use std::path::PathBuf;
+use crate::bluetooth::aacp::BatteryStatus;
+use crate::ui::tray::MyTray;
 
 fn get_proximity_keys_path() -> PathBuf {
     let data_dir = std::env::var("XDG_DATA_HOME")
@@ -66,7 +68,7 @@ fn verify_rpa(addr: &str, irk: &[u8; 16]) -> bool {
     hash == computed_hash
 }
 
-pub async fn start_le_monitor() -> bluer::Result<()> {
+pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> bluer::Result<()> {
     let session = Session::new().await?;
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
@@ -125,6 +127,7 @@ pub async fn start_le_monitor() -> bluer::Result<()> {
 
             if verified_macs.contains(&addr) {
                 let mut events = dev.events().await?;
+                let tray_handle_clone = tray_handle.clone();
                 tokio::spawn(async move {
                     while let Some(ev) = events.next().await {
                         match ev {
@@ -169,6 +172,17 @@ pub async fn start_le_monitor() -> bluer::Result<()> {
                                                     } else {
                                                         (case_byte & 0x7F, (case_byte & 0x80) != 0)
                                                     };
+                                                    
+                                                    if let Some(handle) = &tray_handle_clone {
+                                                        handle.update(|tray: &mut MyTray| {
+                                                            tray.battery_l = if left_byte == 0xff { None } else { Some(left_battery as u8) };
+                                                            tray.battery_l_status = if left_byte == 0xff { Some(BatteryStatus::Disconnected) } else if left_charging { Some(BatteryStatus::Charging) } else { Some(BatteryStatus::NotCharging) };
+                                                            tray.battery_r = if right_byte == 0xff { None } else { Some(right_battery as u8) };
+                                                            tray.battery_r_status = if right_byte == 0xff { Some(BatteryStatus::Disconnected) } else if right_charging { Some(BatteryStatus::Charging) } else { Some(BatteryStatus::NotCharging) };
+                                                            tray.battery_c = if case_byte == 0xff { None } else { Some(case_battery as u8) };
+                                                            tray.battery_c_status = if case_byte == 0xff { Some(BatteryStatus::Disconnected) } else if case_charging { Some(BatteryStatus::Charging) } else { Some(BatteryStatus::NotCharging) };
+                                                        }).await;
+                                                    }
                                                     
                                                     info!("Battery status: Left: {}, Right: {}, Case: {}, InEar: L:{} R:{}", 
                                                           if left_byte == 0xff { "disconnected".to_string() } else { format!("{}% (charging: {})", left_battery, left_charging) },
