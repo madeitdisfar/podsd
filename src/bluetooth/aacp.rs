@@ -6,6 +6,8 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, Instant};
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use serde_json;
 
 const PSM: u16 = 0x1001;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -124,10 +126,20 @@ impl ControlCommandIdentifiers {
 }
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum ProximityKeyType {
     Irk = 0x01,
     EncKey = 0x04,
+}
+
+impl ProximityKeyType {
+    fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x01 => Some(Self::Irk),
+            0x04 => Some(Self::EncKey),
+            _ => None,
+        }
+    }
 }
 
 #[repr(u8)]
@@ -236,10 +248,15 @@ struct AACPManagerState {
     old_ear_detection_status: Vec<EarDetectionStatus>,
     ear_detection_status: Vec<EarDetectionStatus>,
     event_tx: Option<mpsc::UnboundedSender<AACPEvent>>,
+    proximity_keys: HashMap<ProximityKeyType, Vec<u8>>,
 }
 
 impl AACPManagerState {
     fn new() -> Self {
+        let proximity_keys = std::fs::read_to_string("proximity_keys.json")
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         AACPManagerState {
             sender: None,
             control_command_status_list: Vec::new(),
@@ -253,13 +270,14 @@ impl AACPManagerState {
             old_ear_detection_status: Vec::new(),
             ear_detection_status: Vec::new(),
             event_tx: None,
+            proximity_keys,
         }
     }
 }
 
 #[derive(Clone)]
 pub struct AACPManager {
-    state: Arc<Mutex<AACPManagerState>>,
+    pub state: Arc<Mutex<AACPManagerState>>,
     tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
@@ -541,7 +559,17 @@ impl AACPManager {
                     offset += key_length;
                 }
                 info!("Received Proximity Keys Response: {:?}", keys.iter().map(|(kt, kd)| (kt, hex::encode(kd))).collect::<Vec<_>>());
-                let state = self.state.lock().await;
+                let mut state = self.state.lock().await;
+                for (key_type, key_data) in &keys {
+                    if let Some(kt) = ProximityKeyType::from_u8(*key_type) {
+                        state.proximity_keys.insert(kt, key_data.clone());
+                    }
+                }
+                // Persist to file
+                let json = serde_json::to_string(&state.proximity_keys).unwrap();
+                if let Err(e) = tokio::fs::write("proximity_keys.json", json).await {
+                    error!("Failed to save proximity keys: {}", e);
+                }
                 if let Some(ref tx) = state.event_tx {
                     let _ = tx.send(AACPEvent::ProximityKeys(keys));
                 }
@@ -688,7 +716,7 @@ impl AACPManager {
         buffer.push(0x46);
         buffer.extend_from_slice(b"btName");
         buffer.push(0x43);
-        buffer.extend_from_slice(b"Mac");;
+        buffer.extend_from_slice(b"Mac");
         buffer.push(0x58);
         buffer.extend_from_slice(b"otherDevice");
         buffer.extend_from_slice(b"AudioCategory");
