@@ -1,7 +1,7 @@
 use bluer::monitor::{Monitor, MonitorEvent, Pattern, RssiSamplingPeriod};
 use bluer::{Address, Session};
 use aes::Aes128;
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::{BlockEncrypt, KeyInit, BlockDecrypt};
 use aes::cipher::generic_array::GenericArray;
 use std::collections::{HashMap, HashSet};
 use log::{info, error, debug};
@@ -31,6 +31,13 @@ fn e(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
     result
 }
 
+fn decrypt(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
+    let cipher = Aes128::new(&GenericArray::from(*key));
+    let mut block = GenericArray::from(*data);
+    cipher.decrypt_block(&mut block);
+    block.into()
+}
+
 fn ah(k: &[u8; 16], r: &[u8; 3]) -> [u8; 3] {
     let mut r_padded = [0u8; 16];
     r_padded[..3].copy_from_slice(r);
@@ -55,6 +62,7 @@ fn verify_rpa(addr: &str, irk: &[u8; 16]) -> bool {
     let hash_slice = &rpa[0..3];
     let hash: [u8; 3] = hash_slice.try_into().unwrap();
     let computed_hash = ah(irk, &prand);
+    debug!("Verifying RPA: addr={}, hash={:?}, computed_hash={:?}", addr, hash, computed_hash);
     hash == computed_hash
 }
 
@@ -68,6 +76,8 @@ pub async fn start_le_monitor() -> bluer::Result<()> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     let irk = proximity_keys.get(&ProximityKeyType::Irk)
+        .and_then(|v| if v.len() == 16 { Some(<[u8; 16]>::try_from(v.as_slice()).unwrap()) } else { None });
+    let enc_key = proximity_keys.get(&ProximityKeyType::EncKey)
         .and_then(|v| if v.len() == 16 { Some(<[u8; 16]>::try_from(v.as_slice()).unwrap()) } else { None });
     let mut verified_macs: HashSet<Address> = HashSet::new();
 
@@ -85,11 +95,13 @@ pub async fn start_le_monitor() -> bluer::Result<()> {
             rssi_high_threshold: None,
             rssi_low_timeout: None,
             rssi_high_timeout: None,
-            rssi_sampling_period: Some(RssiSamplingPeriod::Period(Duration::from_millis(500))),
+            rssi_sampling_period: Some(RssiSamplingPeriod::Period(Duration::from_millis(100))),
             patterns: Some(vec![pattern]),
             ..Default::default()
         })
         .await?;
+
+    debug!("Started LE monitor");
 
     while let Some(mevt) = monitor_handle.next().await {
         if let MonitorEvent::DeviceFound(devid) = mevt {
@@ -97,11 +109,16 @@ pub async fn start_le_monitor() -> bluer::Result<()> {
             let addr = dev.address();
             let addr_str = addr.to_string();
 
+            debug!("Found device: {}", addr_str);
+
             if !verified_macs.contains(&addr) {
+                debug!("Checking RPA for device: {}", addr_str);
                 if let Some(irk) = &irk {
                     if verify_rpa(&addr_str, irk) {
                         verified_macs.insert(addr);
-                        info!("matched our device ({}) with the irk", addr);
+                        info!("Matched our device ({}) with the irk", addr);
+                    } else {
+                        debug!("Device {} did not match our irk", addr);
                     }
                 }
             }
@@ -114,7 +131,53 @@ pub async fn start_le_monitor() -> bluer::Result<()> {
                             bluer::DeviceEvent::PropertyChanged(prop) => {
                                 match prop {
                                     bluer::DeviceProperty::ManufacturerData(data) => {
-                                        info!("Manufacturer data from {}: {:?}", addr_str, data.iter().map(|(k, v)| (k, hex::encode(v))).collect::<HashMap<_, _>>());
+                                        debug!("Manufacturer data from {}: {:?}", addr_str, data.iter().map(|(k, v)| (k, hex::encode(v))).collect::<HashMap<_, _>>());
+                                        if let Some(enc_key) = &enc_key {
+                                            if let Some(apple_data) = data.get(&76) {
+                                                if apple_data.len() > 20 {
+                                                    let last_16: [u8; 16] = apple_data[apple_data.len() - 16..].try_into().unwrap();
+                                                    let decrypted = decrypt(enc_key, &last_16);
+                                                    debug!("Decrypted data from {}: {}", addr_str, hex::encode(decrypted));
+                                                    
+                                                    let status = apple_data[5] as usize;
+                                                    let primary_left = (status >> 5) & 0x01 == 1;
+                                                    let this_in_case = (status >> 6) & 0x01 == 1;
+                                                    let xor_factor = primary_left ^ this_in_case;
+                                                    let is_left_in_ear = if xor_factor { (status & 0x02) != 0 } else { (status & 0x08) != 0 };
+                                                    let is_right_in_ear = if xor_factor { (status & 0x08) != 0 } else { (status & 0x02) != 0 };
+                                                    let is_flipped = !primary_left;
+                                                    
+                                                    let left_byte_index = if is_flipped { 2 } else { 1 };
+                                                    let right_byte_index = if is_flipped { 1 } else { 2 };
+                                                    
+                                                    let left_byte = decrypted[left_byte_index] as i32;
+                                                    let right_byte = decrypted[right_byte_index] as i32;
+                                                    let case_byte = decrypted[3] as i32;
+                                                    
+                                                    let (left_battery, left_charging) = if left_byte == 0xff {
+                                                        (0, false)
+                                                    } else {
+                                                        (left_byte & 0x7F, (left_byte & 0x80) != 0)
+                                                    };
+                                                    let (right_battery, right_charging) = if right_byte == 0xff {
+                                                        (0, false)
+                                                    } else {
+                                                        (right_byte & 0x7F, (right_byte & 0x80) != 0)
+                                                    };
+                                                    let (case_battery, case_charging) = if case_byte == 0xff {
+                                                        (0, false)
+                                                    } else {
+                                                        (case_byte & 0x7F, (case_byte & 0x80) != 0)
+                                                    };
+                                                    
+                                                    info!("Battery status: Left: {}, Right: {}, Case: {}, InEar: L:{} R:{}", 
+                                                          if left_byte == 0xff { "disconnected".to_string() } else { format!("{}% (charging: {})", left_battery, left_charging) },
+                                                          if right_byte == 0xff { "disconnected".to_string() } else { format!("{}% (charging: {})", right_battery, right_charging) },
+                                                          if case_byte == 0xff { "disconnected".to_string() } else { format!("{}% (charging: {})", case_battery, case_charging) },
+                                                          is_left_in_ear, is_right_in_ear);
+                                                }
+                                            }
+                                        }
                                     }
                                     _ => {}
                                 }
