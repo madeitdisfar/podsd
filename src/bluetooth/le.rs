@@ -97,7 +97,7 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
             rssi_high_threshold: None,
             rssi_low_timeout: None,
             rssi_high_timeout: None,
-            rssi_sampling_period: Some(RssiSamplingPeriod::Period(Duration::from_millis(100))),
+            rssi_sampling_period: None,
             patterns: Some(vec![pattern]),
             ..Default::default()
         })
