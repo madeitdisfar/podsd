@@ -25,6 +25,8 @@ struct Args {
     debug: bool,
     #[arg(long)]
     no_tray: bool,
+    #[arg(long)]
+    start_minimized: bool,
 }
 
 fn main() -> iced::Result {
@@ -41,7 +43,7 @@ fn main() -> iced::Result {
         rt.block_on(async_main(ui_tx)).unwrap();
     });
 
-    ui::window::start_ui(ui_rx)
+    ui::window::start_ui(ui_rx, args.start_minimized)
 }
 
 

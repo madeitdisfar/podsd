@@ -5,11 +5,11 @@ use std::sync::Arc;
 use log::debug;
 use tokio::sync::{mpsc::UnboundedReceiver, Mutex};
 
-pub fn start_ui(ui_rx: UnboundedReceiver<()>) -> iced::Result {
+pub fn start_ui(ui_rx: UnboundedReceiver<()>, start_minimized: bool) -> iced::Result {
     daemon(App::title, App::update, App::view)
         .subscription(App::subscription)
         .theme(App::theme)
-        .run_with(|| App::new(ui_rx))
+        .run_with(move || App::new(ui_rx, start_minimized))
 }
 
 pub struct App {
@@ -44,26 +44,32 @@ pub enum Pane {
 }
 
 impl App {
-    pub fn new(ui_rx: UnboundedReceiver<()>) -> (Self, Task<Message>) {
+    pub fn new(ui_rx: UnboundedReceiver<()>, start_minimized: bool) -> (Self, Task<Message>) {
         let (mut panes, first_pane) = pane_grid::State::new(Pane::Sidebar);
         let split = panes.split(pane_grid::Axis::Vertical, first_pane, Pane::Content);
         panes.resize(split.unwrap().1, 0.2);
-
-        let (_, open) = window::open(window::Settings::default());
 
         let ui_rx = Arc::new(Mutex::new(ui_rx));
         let wait_task = Task::perform(
             wait_for_message(Arc::clone(&ui_rx)),
             |_| Message::OpenMainWindow,
         );
+
+        let (window, open_task) = if start_minimized {
+            (None, Task::none())
+        } else {
+            let (id, open) = window::open(window::Settings::default());
+            (Some(id), open.map(Message::WindowOpened))
+        };
+
         (
             Self {
-                window: None,
+                window,
                 panes,
                 selected_tab: Tab::Device1,
                 ui_rx,
             },
-            Task::batch(vec![open.map(Message::WindowOpened), wait_task]),
+            Task::batch(vec![open_task, wait_task]),
         )
     }
 
