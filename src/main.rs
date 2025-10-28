@@ -4,7 +4,7 @@ mod media_controller;
 mod ui;
 
 use std::env;
-use log::{debug, info};
+use log::info;
 use dbus::blocking::Connection;
 use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
 use dbus::message::MatchRule;

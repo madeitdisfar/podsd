@@ -1,16 +1,18 @@
-use bluer::monitor::{Monitor, MonitorEvent, Pattern, RssiSamplingPeriod};
+use bluer::monitor::{Monitor, MonitorEvent, Pattern};
 use bluer::{Address, Session};
 use aes::Aes128;
 use aes::cipher::{BlockEncrypt, KeyInit, BlockDecrypt};
 use aes::cipher::generic_array::GenericArray;
 use std::collections::{HashMap, HashSet};
-use log::{info, error, debug};
+use log::{info, debug};
 use serde_json;
 use crate::bluetooth::aacp::ProximityKeyType;
 use futures::StreamExt;
 use hex;
-use std::time::Duration;
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use crate::bluetooth::aacp::BatteryStatus;
 use crate::ui::tray::MyTray;
 
@@ -18,6 +20,12 @@ fn get_proximity_keys_path() -> PathBuf {
     let data_dir = std::env::var("XDG_DATA_HOME")
         .unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
     PathBuf::from(data_dir).join("librepods").join("proximity_keys.json")
+}
+
+fn get_preferences_path() -> PathBuf {
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
+    PathBuf::from(config_dir).join("librepods").join("preferences.json")
 }
 
 fn e(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
@@ -73,15 +81,15 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
-    let proximity_keys: HashMap<ProximityKeyType, Vec<u8>> = std::fs::read_to_string(get_proximity_keys_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    let irk = proximity_keys.get(&ProximityKeyType::Irk)
-        .and_then(|v| if v.len() == 16 { Some(<[u8; 16]>::try_from(v.as_slice()).unwrap()) } else { None });
-    let enc_key = proximity_keys.get(&ProximityKeyType::EncKey)
-        .and_then(|v| if v.len() == 16 { Some(<[u8; 16]>::try_from(v.as_slice()).unwrap()) } else { None });
-    let mut verified_macs: HashSet<Address> = HashSet::new();
+    let all_proximity_keys: HashMap<String, HashMap<ProximityKeyType, Vec<u8>>> =
+        std::fs::read_to_string(get_proximity_keys_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+    let mut verified_macs: HashMap<Address, String> = HashMap::new();
+    let mut failed_macs: HashSet<Address> = HashSet::new();
+    let connecting_macs = Arc::new(Mutex::new(HashSet::<Address>::new()));
 
     let pattern = Pattern {
         data_type: 0xFF,  // Manufacturer specific data
@@ -107,41 +115,128 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
 
     while let Some(mevt) = monitor_handle.next().await {
         if let MonitorEvent::DeviceFound(devid) = mevt {
-            let dev = adapter.device(devid.device)?;
+            let adapter_monitor_clone = adapter.clone();
+            let dev = adapter_monitor_clone.device(devid.device)?;
             let addr = dev.address();
             let addr_str = addr.to_string();
 
-            debug!("Found device: {}", addr_str);
+            let matched_airpods_mac: Option<String>;
+            let mut matched_enc_key: Option<[u8; 16]> = None;
 
-            if !verified_macs.contains(&addr) {
+            if let Some(airpods_mac) = verified_macs.get(&addr) {
+                matched_airpods_mac = Some(airpods_mac.clone());
+            } else if failed_macs.contains(&addr) {
+                continue;
+            } else {
                 debug!("Checking RPA for device: {}", addr_str);
-                if let Some(irk) = &irk {
-                    if verify_rpa(&addr_str, irk) {
-                        verified_macs.insert(addr);
-                        info!("Matched our device ({}) with the irk", addr);
-                    } else {
-                        debug!("Device {} did not match our irk", addr);
+                let mut found_mac = None;
+                for (airpods_mac, keys) in &all_proximity_keys {
+                    if let Some(irk_vec) = keys.get(&ProximityKeyType::Irk) {
+                        if irk_vec.len() == 16 {
+                            let irk: [u8; 16] = irk_vec.as_slice().try_into().unwrap();
+                            debug!("Verifying RPA {} for airpods MAC {} with IRK {}", addr_str, airpods_mac, hex::encode(irk));
+                            if verify_rpa(&addr_str, &irk) {
+                                info!("Matched our device ({}) with the irk for {}", addr, airpods_mac);
+                                verified_macs.insert(addr, airpods_mac.clone());
+                                found_mac = Some(airpods_mac.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(mac) = found_mac {
+                    matched_airpods_mac = Some(mac);
+                } else {
+                    failed_macs.insert(addr);
+                    debug!("Device {} did not match any of our irks", addr);
+                    continue;
+                }
+            }
+
+            if let Some(ref mac) = matched_airpods_mac {
+                if let Some(keys) = all_proximity_keys.get(mac) {
+                    if let Some(enc_key_vec) = keys.get(&ProximityKeyType::EncKey) {
+                        if enc_key_vec.len() == 16 {
+                            matched_enc_key = Some(enc_key_vec.as_slice().try_into().unwrap());
+                        }
                     }
                 }
             }
 
-            if verified_macs.contains(&addr) {
+            if matched_airpods_mac.is_some() {
                 let mut events = dev.events().await?;
                 let tray_handle_clone = tray_handle.clone();
+                let connecting_macs_clone = Arc::clone(&connecting_macs);
                 tokio::spawn(async move {
                     while let Some(ev) = events.next().await {
                         match ev {
                             bluer::DeviceEvent::PropertyChanged(prop) => {
                                 match prop {
                                     bluer::DeviceProperty::ManufacturerData(data) => {
-                                        debug!("Manufacturer data from {}: {:?}", addr_str, data.iter().map(|(k, v)| (k, hex::encode(v))).collect::<HashMap<_, _>>());
-                                        if let Some(enc_key) = &enc_key {
+                                        if let Some(enc_key) = &matched_enc_key {
                                             if let Some(apple_data) = data.get(&76) {
                                                 if apple_data.len() > 20 {
                                                     let last_16: [u8; 16] = apple_data[apple_data.len() - 16..].try_into().unwrap();
                                                     let decrypted = decrypt(enc_key, &last_16);
-                                                    debug!("Decrypted data from {}: {}", addr_str, hex::encode(decrypted));
-                                                    
+                                                    debug!("Decrypted data from airpods_mac {}: {}",
+                                                           matched_airpods_mac.as_ref().unwrap_or(&"unknown".to_string()),
+                                                           hex::encode(&decrypted));
+
+                                                    let connection_state = apple_data[10] as usize;
+                                                    debug!("Connection state: {}", connection_state);
+                                                    if connection_state == 0x00 {
+                                                        let pref_path = get_preferences_path();
+                                                        let preferences: HashMap<String, HashMap<String, bool>> =
+                                                            std::fs::read_to_string(&pref_path)
+                                                                .ok()
+                                                                .and_then(|s| serde_json::from_str(&s).ok())
+                                                                .unwrap_or_default();
+                                                        let auto_connect = preferences.get(matched_airpods_mac.as_ref().unwrap())
+                                                            .and_then(|prefs| prefs.get("autoConnect"))
+                                                            .copied()
+                                                            .unwrap_or(true);
+                                                        debug!("Auto-connect preference for {}: {}", matched_airpods_mac.as_ref().unwrap(), auto_connect);
+                                                        if auto_connect {
+                                                            let real_address = Address::from_str(&addr_str).unwrap();
+                                                            let mut cm = connecting_macs_clone.lock().await;
+                                                            if cm.contains(&real_address) {
+                                                                info!("Already connecting to {}, skipping duplicate attempt.", matched_airpods_mac.as_ref().unwrap());
+                                                                return;
+                                                            }
+                                                            cm.insert(real_address);
+                                                            // let adapter_clone = adapter_monitor_clone.clone();
+                                                            // let real_device = adapter_clone.device(real_address).unwrap();
+                                                            info!("AirPods are disconnected, attempting to connect to {}", matched_airpods_mac.as_ref().unwrap());
+                                                            // if let Err(e) = real_device.connect().await {
+                                                            //     info!("Failed to connect to AirPods {}: {}", matched_airpods_mac.as_ref().unwrap(), e);
+                                                            // } else {
+                                                            //     info!("Successfully connected to AirPods {}", matched_airpods_mac.as_ref().unwrap());
+                                                            // }
+                                                            // call bluetoothctl connect <mac> for now, I don't know why bluer connect isn't working
+                                                            let output = tokio::process::Command::new("bluetoothctl")
+                                                                .arg("connect")
+                                                                .arg(matched_airpods_mac.as_ref().unwrap())
+                                                                .output()
+                                                                .await;
+                                                            match output {
+                                                                Ok(output) => {
+                                                                    if output.status.success() {
+                                                                        info!("Successfully connected to AirPods {}", matched_airpods_mac.as_ref().unwrap());
+                                                                        cm.remove(&real_address);
+                                                                    } else {
+                                                                        let stderr = String::from_utf8_lossy(&output.stderr);
+                                                                        info!("Failed to connect to AirPods {}: {}", matched_airpods_mac.as_ref().unwrap(), stderr);
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    info!("Failed to execute bluetoothctl to connect to AirPods {}: {}", matched_airpods_mac.as_ref().unwrap(), e);
+                                                                }
+                                                            }
+                                                            info!("Auto-connect is disabled for {}, not attempting to connect.", matched_airpods_mac.as_ref().unwrap());
+                                                        }
+                                                    }
+
                                                     let status = apple_data[5] as usize;
                                                     let primary_left = (status >> 5) & 0x01 == 1;
                                                     let this_in_case = (status >> 6) & 0x01 == 1;
@@ -184,7 +279,7 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
                                                         }).await;
                                                     }
                                                     
-                                                    info!("Battery status: Left: {}, Right: {}, Case: {}, InEar: L:{} R:{}", 
+                                                    debug!("Battery status: Left: {}, Right: {}, Case: {}, InEar: L:{} R:{}",
                                                           if left_byte == 0xff { "disconnected".to_string() } else { format!("{}% (charging: {})", left_battery, left_charging) },
                                                           if right_byte == 0xff { "disconnected".to_string() } else { format!("{}% (charging: {})", right_battery, right_charging) },
                                                           if case_byte == 0xff { "disconnected".to_string() } else { format!("{}% (charging: {})", case_battery, case_charging) },

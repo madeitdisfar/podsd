@@ -242,20 +242,21 @@ pub enum AACPEvent {
     OwnershipToFalseRequest,
 }
 
-struct AACPManagerState {
-    sender: Option<mpsc::Sender<Vec<u8>>>,
-    control_command_status_list: Vec<ControlCommandStatus>,
-    control_command_subscribers: HashMap<ControlCommandIdentifiers, Vec<mpsc::UnboundedSender<Vec<u8>>>>,
-    owns: bool,
-    old_connected_devices: Vec<ConnectedDevice>,
-    connected_devices: Vec<ConnectedDevice>,
-    audio_source: Option<AudioSource>,
-    battery_info: Vec<BatteryInfo>,
+pub struct AACPManagerState {
+    pub sender: Option<mpsc::Sender<Vec<u8>>>,
+    pub control_command_status_list: Vec<ControlCommandStatus>,
+    pub control_command_subscribers: HashMap<ControlCommandIdentifiers, Vec<mpsc::UnboundedSender<Vec<u8>>>>,
+    pub owns: bool,
+    pub old_connected_devices: Vec<ConnectedDevice>,
+    pub connected_devices: Vec<ConnectedDevice>,
+    pub audio_source: Option<AudioSource>,
+    pub battery_info: Vec<BatteryInfo>,
     pub conversational_awareness_status: u8,
-    old_ear_detection_status: Vec<EarDetectionStatus>,
-    ear_detection_status: Vec<EarDetectionStatus>,
+    pub old_ear_detection_status: Vec<EarDetectionStatus>,
+    pub ear_detection_status: Vec<EarDetectionStatus>,
     event_tx: Option<mpsc::UnboundedSender<AACPEvent>>,
     proximity_keys: HashMap<ProximityKeyType, Vec<u8>>,
+    pub airpods_mac: Option<Address>,
 }
 
 impl AACPManagerState {
@@ -278,6 +279,7 @@ impl AACPManagerState {
             ear_detection_status: Vec::new(),
             event_tx: None,
             proximity_keys,
+            airpods_mac: None,
         }
     }
 }
@@ -299,6 +301,11 @@ impl AACPManager {
     pub async fn connect(&mut self, addr: Address) {
         info!("AACPManager connecting to {} on PSM {:#06X}...", addr, PSM);
         let target_sa = SocketAddr::new(addr, AddressType::BrEdr, PSM);
+
+        {
+            let mut state = self.state.lock().await;
+            state.airpods_mac = Some(addr);
+        }
 
         let socket = match Socket::new_seq_packet() {
             Ok(s) => s,
@@ -384,11 +391,7 @@ impl AACPManager {
         let mut state = self.state.lock().await;
         state.event_tx = Some(tx);
     }
-
-    pub async fn get_connected_devices(&self) -> Vec<ConnectedDevice> {
-        self.state.lock().await.connected_devices.clone()
-    }
-
+    
     pub async fn subscribe_to_control_command(&self, identifier: ControlCommandIdentifiers, tx: mpsc::UnboundedSender<Vec<u8>>) {
         let mut state = self.state.lock().await;
         state.control_command_subscribers.entry(identifier).or_default().push(tx);
@@ -573,17 +576,28 @@ impl AACPManager {
                     }
                 }
 
-                let json = serde_json::to_string(&state.proximity_keys).unwrap();
-                let path = get_proximity_keys_path();
-                if let Some(parent) = path.parent() {
-                    if let Err(e) = tokio::fs::create_dir_all(&parent).await {
-                        error!("Failed to create directory for proximity keys: {}", e);
-                        return;
+                if let Some(mac) = state.airpods_mac {
+                    let path = get_proximity_keys_path();
+                    let mut all_keys: HashMap<String, HashMap<ProximityKeyType, Vec<u8>>> =
+                        std::fs::read_to_string(&path)
+                            .ok()
+                            .and_then(|s| serde_json::from_str(&s).ok())
+                            .unwrap_or_default();
+
+                    all_keys.insert(mac.to_string(), state.proximity_keys.clone());
+
+                    let json = serde_json::to_string(&all_keys).unwrap();
+                    if let Some(parent) = path.parent() {
+                        if let Err(e) = tokio::fs::create_dir_all(&parent).await {
+                            error!("Failed to create directory for proximity keys: {}", e);
+                            return;
+                        }
+                    }
+                    if let Err(e) = tokio::fs::write(&path, json).await {
+                        error!("Failed to save proximity keys: {}", e);
                     }
                 }
-                if let Err(e) = tokio::fs::write(&path, json).await {
-                    error!("Failed to save proximity keys: {}", e);
-                }
+
                 if let Some(ref tx) = state.event_tx {
                     let _ = tx.send(AACPEvent::ProximityKeys(keys));
                 }

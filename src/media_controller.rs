@@ -124,13 +124,18 @@ impl MediaController {
             drop(state);
 
             if !was_playing && is_playing {
+                let aacp_state = aacp_manager.state.lock().await;
+                if !aacp_state.ear_detection_status.contains(&EarDetectionStatus::InEar) {
+                    info!("Media playback started but buds not in ear, skipping takeover");
+                    continue;
+                }
                 info!("Media playback started, taking ownership and activating a2dp");
                 let _ = control_tx.send((crate::bluetooth::aacp::ControlCommandIdentifiers::OwnsConnection, vec![0x01]));
                 self.activate_a2dp_profile().await;
 
                 info!("already connected locally, hijacking connection by asking AirPods");
 
-                let connected_devices = aacp_manager.get_connected_devices().await;
+                let connected_devices = aacp_state.connected_devices.clone();
                 for device in connected_devices {
                     if device.mac != local_mac {
                         if let Err(e) = aacp_manager.send_media_information(&local_mac, &device.mac, true).await {
@@ -144,6 +149,8 @@ impl MediaController {
                         }
                     }
                 }
+
+                debug!("completed playback takeover process");
             }
         }
     }
@@ -718,6 +725,7 @@ impl MediaController {
 
             if let Some(list) = card_info_list.borrow().as_ref() {
                 for card in list {
+                    debug!("Checking card index {} for MAC match", card.index);
                     let props = &card.proplist;
                     if let Some(device_string) = props.get_str("device.string") {
                         if device_string.contains(&mac_clone) {
@@ -905,6 +913,29 @@ impl MediaController {
                     debug!("No stored original volume to restore to on status 6");
                 }
             }
+            9 => {
+                let mut maybe_original = None;
+                {
+                    let mut state = self.state.lock().await;
+                    if state.conv_conversation_started {
+                        maybe_original = state.conv_original_volume;
+                        state.conv_original_volume = None;
+                        state.conv_conversation_started = false;
+                    } else {
+                        debug!("Received status 9 but conversation was not started; ignoring restore");
+                        return;
+                    }
+                }
+                if let Some(orig) = maybe_original {
+                    let sink_clone = sink.clone();
+                    tokio::task::spawn_blocking(move || {
+                        transition_sink_volume(&sink_clone, orig)
+                    }).await.unwrap_or(false);
+                    info!("Conversation end (9): restored volume to original {}", orig);
+                } else {
+                    debug!("No stored original volume to restore to on status 9");
+                }
+            }
             _ => {
                 debug!("Unknown conversational awareness status: {}", status);
             }
@@ -913,30 +944,48 @@ impl MediaController {
 }
 
 fn get_sink_volume_percent_by_name_sync(sink_name: &str) -> Option<u32> {
-    match Command::new("pactl").args(&["get-sink-volume", sink_name]).output() {
-        Ok(output) if output.status.success() => {
-            if let Ok(s) = String::from_utf8(output.stdout) {
-                if let Some(pct_idx) = s.find('%') {
-                    let mut start = pct_idx;
-                    let bytes = s.as_bytes();
-                    while start > 0 {
-                        let b = bytes[start - 1];
-                        if b.is_ascii_digit() {
-                            start -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    if start < pct_idx {
-                        if let Ok(num) = s[start..pct_idx].trim().parse::<u32>() {
-                            return Some(num);
-                        }
-                    }
-                }
-            }
-            None
+    let mut mainloop = Mainloop::new().unwrap();
+    let mut context = Context::new(&mut mainloop, "LibrePods-get_sink_volume").unwrap();
+    context.connect(None, ContextFlagSet::NOAUTOSPAWN, None).unwrap();
+    loop {
+        match mainloop.iterate(false) {
+            _ if context.get_state() == libpulse_binding::context::State::Ready => break,
+            _ if context.get_state() == libpulse_binding::context::State::Failed || context.get_state() == libpulse_binding::context::State::Terminated => return None,
+            _ => {},
         }
-        _ => None,
+    }
+
+    let introspector = context.introspect();
+    let sink_info_option = Rc::new(RefCell::new(None));
+    let op = introspector.get_sink_info_by_name(sink_name, {
+        let sink_info_option = sink_info_option.clone();
+        move |result: ListResult<&SinkInfo>| {
+            if let ListResult::Item(item) = result {
+                let owned_item = OwnedSinkInfo {
+                    name: item.name.as_ref().map(|s| s.to_string()),
+                    proplist: item.proplist.clone(),
+                    volume: item.volume,
+                };
+                *sink_info_option.borrow_mut() = Some(owned_item);
+            }
+        }
+    });
+    while op.get_state() == OperationState::Running {
+        mainloop.iterate(false);
+    }
+    mainloop.quit(Retval(0));
+
+    if let Some(sink_info) = sink_info_option.borrow().as_ref() {
+        let channels = sink_info.volume.len();
+        if channels == 0 {
+            return None;
+        }
+        let total: f64 = sink_info.volume.get().iter().map(|v| v.0 as f64).sum();
+        let average_raw = total / channels as f64;
+        let percent = ((average_raw / Volume::NORMAL.0 as f64) * 100.0).round() as u32;
+        Some(percent)
+    } else {
+        None
     }
 }
 

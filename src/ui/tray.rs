@@ -90,13 +90,13 @@ impl ksni::Tray for MyTray {
         let options = if allow_off {
             vec![
                 ("Off", 0x01),
-                ("ANC", 0x02),
+                ("Noise Cancellation", 0x02),
                 ("Transparency", 0x03),
                 ("Adaptive", 0x04),
             ]
         } else {
             vec![
-                ("ANC", 0x02),
+                ("Noise Cancellation", 0x02),
                 ("Transparency", 0x03),
                 ("Adaptive", 0x04),
             ]
@@ -121,6 +121,7 @@ impl ksni::Tray for MyTray {
                 ..Default::default()
             }
             .into(),
+            MenuItem::Separator,
             CheckmarkItem {
                 label: "Conversation Detection".into(),
                 checked: self.conversation_detect_enabled.unwrap_or(false),
