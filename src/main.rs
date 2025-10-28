@@ -17,6 +17,7 @@ use ksni::TrayMethods;
 use crate::ui::tray::MyTray;
 use clap::Parser;
 use crate::bluetooth::le::start_le_monitor;
+use tokio::sync::mpsc::unbounded_channel;
 
 #[derive(Parser)]
 struct Args {
@@ -26,14 +27,26 @@ struct Args {
     no_tray: bool,
 }
 
-#[tokio::main]
-async fn main() -> bluer::Result<()> {
+fn main() -> iced::Result {
     let args = Args::parse();
     let log_level = if args.debug { "debug" } else { "info" };
     if env::var("RUST_LOG").is_err() {
         unsafe { env::set_var("RUST_LOG", log_level); }
     }
     env_logger::init();
+
+    let (ui_tx, ui_rx) = unbounded_channel::<()>();
+    std::thread::spawn(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async_main(ui_tx)).unwrap();
+    });
+
+    ui::window::start_ui(ui_rx)
+}
+
+
+async fn async_main(ui_tx: tokio::sync::mpsc::UnboundedSender<()>) -> bluer::Result<()> {
+    let args = Args::parse();
 
     let tray_handle = if args.no_tray {
         None
@@ -50,6 +63,7 @@ async fn main() -> bluer::Result<()> {
             listening_mode: None,
             allow_off_option: None,
             command_tx: None,
+            ui_tx: Some(ui_tx),
         };
         let handle = tray.spawn().await.unwrap();
         Some(handle)

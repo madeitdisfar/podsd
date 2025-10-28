@@ -2,6 +2,7 @@
 
 use ab_glyph::{Font, ScaleFont};
 use ksni::{Icon, ToolTip};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::bluetooth::aacp::ControlCommandIdentifiers;
 
@@ -18,6 +19,7 @@ pub(crate) struct MyTray {
     pub(crate) listening_mode: Option<u8>,
     pub(crate) allow_off_option: Option<u8>,
     pub(crate) command_tx: Option<tokio::sync::mpsc::UnboundedSender<(ControlCommandIdentifiers, Vec<u8>)>>,
+    pub(crate) ui_tx: Option<UnboundedSender<()>>,
 }
 
 impl ksni::Tray for MyTray {
@@ -106,6 +108,16 @@ impl ksni::Tray for MyTray {
         }).unwrap_or(0);
         let options_clone = options.clone();
         vec![
+            StandardItem {
+                label: "Open Window".into(),
+                icon_name: "window-new".into(),
+                activate: Box::new(|this: &mut Self| {
+                    if let Some(tx) = &this.ui_tx {
+                        let _ = tx.send(());
+                    }
+                }),
+                ..Default::default()
+            }.into(),
             RadioGroup {
                 selected,
                 select: Box::new(move |this: &mut Self, current| {
