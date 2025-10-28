@@ -1,3 +1,4 @@
+use std::cmp::PartialEq;
 use bluer::monitor::{Monitor, MonitorEvent, Pattern};
 use bluer::{Address, Session};
 use aes::Aes128;
@@ -15,11 +16,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::bluetooth::aacp::BatteryStatus;
 use crate::ui::tray::MyTray;
+use crate::bluetooth::aacp::{DeviceData, LEData, DeviceType};
 
-fn get_proximity_keys_path() -> PathBuf {
+fn get_devices_path() -> PathBuf {
     let data_dir = std::env::var("XDG_DATA_HOME")
         .unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(data_dir).join("librepods").join("proximity_keys.json")
+    PathBuf::from(data_dir).join("librepods").join("devices.json")
 }
 
 fn get_preferences_path() -> PathBuf {
@@ -76,13 +78,21 @@ fn verify_rpa(addr: &str, irk: &[u8; 16]) -> bool {
     hash == computed_hash
 }
 
+impl PartialEq for DeviceType {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (DeviceType::AirPods, DeviceType::AirPods) => true
+        }
+    }
+}
+
 pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> bluer::Result<()> {
     let session = Session::new().await?;
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
-    let all_proximity_keys: HashMap<String, HashMap<ProximityKeyType, Vec<u8>>> =
-        std::fs::read_to_string(get_proximity_keys_path())
+    let all_devices: HashMap<String, DeviceData> =
+        std::fs::read_to_string(get_devices_path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -130,16 +140,18 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
             } else {
                 debug!("Checking RPA for device: {}", addr_str);
                 let mut found_mac = None;
-                for (airpods_mac, keys) in &all_proximity_keys {
-                    if let Some(irk_vec) = keys.get(&ProximityKeyType::Irk) {
-                        if irk_vec.len() == 16 {
-                            let irk: [u8; 16] = irk_vec.as_slice().try_into().unwrap();
-                            debug!("Verifying RPA {} for airpods MAC {} with IRK {}", addr_str, airpods_mac, hex::encode(irk));
-                            if verify_rpa(&addr_str, &irk) {
-                                info!("Matched our device ({}) with the irk for {}", addr, airpods_mac);
-                                verified_macs.insert(addr, airpods_mac.clone());
-                                found_mac = Some(airpods_mac.clone());
-                                break;
+                for (airpods_mac, device_data) in &all_devices {
+                    if device_data.type_ == DeviceType::AirPods {
+                        if let Ok(irk_bytes) = hex::decode(&device_data.le.irk) {
+                            if irk_bytes.len() == 16 {
+                                let irk: [u8; 16] = irk_bytes.as_slice().try_into().unwrap();
+                                debug!("Verifying RPA {} for airpods MAC {} with IRK {}", addr_str, airpods_mac, device_data.le.irk);
+                                if verify_rpa(&addr_str, &irk) {
+                                    info!("Matched our device ({}) with the irk for {}", addr, airpods_mac);
+                                    verified_macs.insert(addr, airpods_mac.clone());
+                                    found_mac = Some(airpods_mac.clone());
+                                    break;
+                                }
                             }
                         }
                     }
@@ -155,10 +167,12 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
             }
 
             if let Some(ref mac) = matched_airpods_mac {
-                if let Some(keys) = all_proximity_keys.get(mac) {
-                    if let Some(enc_key_vec) = keys.get(&ProximityKeyType::EncKey) {
-                        if enc_key_vec.len() == 16 {
-                            matched_enc_key = Some(enc_key_vec.as_slice().try_into().unwrap());
+                if let Some(device_data) = all_devices.get(mac) {
+                    if !device_data.le.enc_key.is_empty() {
+                        if let Ok(enc_key_bytes) = hex::decode(&device_data.le.enc_key) {
+                            if enc_key_bytes.len() == 16 {
+                                matched_enc_key = Some(enc_key_bytes.as_slice().try_into().unwrap());
+                            }
                         }
                     }
                 }

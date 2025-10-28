@@ -15,10 +15,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEADER_BYTES: [u8; 4] = [0x04, 0x00, 0x04, 0x00];
 
-fn get_proximity_keys_path() -> PathBuf {
+fn get_devices_path() -> PathBuf {
     let data_dir = std::env::var("XDG_DATA_HOME")
         .unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(data_dir).join("librepods").join("proximity_keys.json")
+    PathBuf::from(data_dir).join("librepods").join("devices.json")
 }
 
 pub mod opcodes {
@@ -28,7 +28,7 @@ pub mod opcodes {
     pub const CONTROL_COMMAND: u8 = 0x09;
     pub const EAR_DETECTION: u8 = 0x06;
     pub const CONVERSATION_AWARENESS: u8 = 0x4B;
-    pub const DEVICE_METADATA: u8 = 0x1D;
+    pub const INFORMATION: u8 = 0x1D;
     pub const RENAME: u8 = 0x1E;
     pub const PROXIMITY_KEYS_REQ: u8 = 0x30;
     pub const PROXIMITY_KEYS_RSP: u8 = 0x31;
@@ -242,6 +242,39 @@ pub enum AACPEvent {
     OwnershipToFalseRequest,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DeviceType {
+    AirPods,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LEData {
+    pub irk: String,
+    pub enc_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AirPodsInformation {
+    pub name: String,
+    pub model_number: String,
+    pub manufacturer: String,
+    pub serial_number: String,
+    pub version1: String,
+    pub version2: String,
+    pub hardware_revision: String,
+    pub updater_identifier: String,
+    pub left_serial_number: String,
+    pub right_serial_number: String,
+    pub version3: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceData {
+    pub type_: DeviceType,
+    pub le: LEData,
+    pub information: Option<AirPodsInformation>,
+}
+
 pub struct AACPManagerState {
     pub sender: Option<mpsc::Sender<Vec<u8>>>,
     pub control_command_status_list: Vec<ControlCommandStatus>,
@@ -255,16 +288,17 @@ pub struct AACPManagerState {
     pub old_ear_detection_status: Vec<EarDetectionStatus>,
     pub ear_detection_status: Vec<EarDetectionStatus>,
     event_tx: Option<mpsc::UnboundedSender<AACPEvent>>,
-    proximity_keys: HashMap<ProximityKeyType, Vec<u8>>,
+    pub devices: HashMap<String, DeviceData>,
     pub airpods_mac: Option<Address>,
 }
 
 impl AACPManagerState {
     fn new() -> Self {
-        let proximity_keys = std::fs::read_to_string(get_proximity_keys_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let devices: HashMap<String, DeviceData> =
+            std::fs::read_to_string(get_devices_path())
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
         AACPManagerState {
             sender: None,
             control_command_status_list: Vec::new(),
@@ -278,7 +312,7 @@ impl AACPManagerState {
             old_ear_detection_status: Vec::new(),
             ear_detection_status: Vec::new(),
             event_tx: None,
-            proximity_keys,
+            devices,
             airpods_mac: None,
         }
     }
@@ -542,7 +576,66 @@ impl AACPManager {
                     info!("Received Conversation Awareness packet with unexpected length: {}", packet.len());
                 }
             }
-            opcodes::DEVICE_METADATA => info!("Received Device Metadata packet."),
+            opcodes::INFORMATION => {
+                if payload.len() < 6 {
+                    error!("Information packet too short: {}", hex::encode(payload));
+                    return;
+                }
+                let data = &payload[4..];
+                let mut index = 0;
+                while index < data.len() && data[index] != 0x00 {
+                    index += 1;
+                }
+                let mut strings = Vec::new();
+                while index < data.len() {
+                    while index < data.len() && data[index] == 0x00 {
+                        index += 1;
+                    }
+                    if index >= data.len() {
+                        break;
+                    }
+                    let start = index;
+                    while index < data.len() && data[index] != 0x00 {
+                        index += 1;
+                    }
+                    let str_bytes = &data[start..index];
+                    if let Ok(s) = std::str::from_utf8(str_bytes) {
+                        strings.push(s.to_string());
+                    }
+                }
+                strings.remove(0); // Remove the first empty string as per comment
+                let info = AirPodsInformation {
+                    name: strings.get(0).cloned().unwrap_or_default(),
+                    model_number: strings.get(1).cloned().unwrap_or_default(),
+                    manufacturer: strings.get(2).cloned().unwrap_or_default(),
+                    serial_number: strings.get(3).cloned().unwrap_or_default(),
+                    version1: strings.get(4).cloned().unwrap_or_default(),
+                    version2: strings.get(5).cloned().unwrap_or_default(),
+                    hardware_revision: strings.get(6).cloned().unwrap_or_default(),
+                    updater_identifier: strings.get(7).cloned().unwrap_or_default(),
+                    left_serial_number: strings.get(8).cloned().unwrap_or_default(),
+                    right_serial_number: strings.get(9).cloned().unwrap_or_default(),
+                    version3: strings.get(10).cloned().unwrap_or_default(),
+                };
+                let mut state = self.state.lock().await;
+                if let Some(mac) = state.airpods_mac {
+                    if let Some(device_data) = state.devices.get_mut(&mac.to_string()) {
+                        device_data.information = Some(info.clone());
+                    }
+                }
+                let json = serde_json::to_string(&state.devices).unwrap();
+                if let Some(parent) = get_devices_path().parent() {
+                    if let Err(e) = tokio::fs::create_dir_all(&parent).await {
+                        error!("Failed to create directory for devices: {}", e);
+                        return;
+                    }
+                }
+                if let Err(e) = tokio::fs::write(&get_devices_path(), json).await {
+                    error!("Failed to save devices: {}", e);
+                }
+                info!("Received Information: {:?}", info);
+            },
+
             opcodes::PROXIMITY_KEYS_RSP => {
                 if payload.len() < 4 {
                     error!("Proximity Keys Response packet too short: {}", hex::encode(payload));
@@ -572,34 +665,29 @@ impl AACPManager {
                 let mut state = self.state.lock().await;
                 for (key_type, key_data) in &keys {
                     if let Some(kt) = ProximityKeyType::from_u8(*key_type) {
-                        state.proximity_keys.insert(kt, key_data.clone());
-                    }
-                }
-
-                if let Some(mac) = state.airpods_mac {
-                    let path = get_proximity_keys_path();
-                    let mut all_keys: HashMap<String, HashMap<ProximityKeyType, Vec<u8>>> =
-                        std::fs::read_to_string(&path)
-                            .ok()
-                            .and_then(|s| serde_json::from_str(&s).ok())
-                            .unwrap_or_default();
-
-                    all_keys.insert(mac.to_string(), state.proximity_keys.clone());
-
-                    let json = serde_json::to_string(&all_keys).unwrap();
-                    if let Some(parent) = path.parent() {
-                        if let Err(e) = tokio::fs::create_dir_all(&parent).await {
-                            error!("Failed to create directory for proximity keys: {}", e);
-                            return;
+                        if let Some(mac) = state.airpods_mac {
+                            let mac_str = mac.to_string();
+                            let device_data = state.devices.entry(mac_str.clone()).or_insert(DeviceData {
+                                type_: DeviceType::AirPods,
+                                le: LEData { irk: "".to_string(), enc_key: "".to_string() },
+                                information: None,
+                            });
+                            match kt {
+                                ProximityKeyType::Irk => device_data.le.irk = hex::encode(key_data),
+                                ProximityKeyType::EncKey => device_data.le.enc_key = hex::encode(key_data),
+                            }
                         }
                     }
-                    if let Err(e) = tokio::fs::write(&path, json).await {
-                        error!("Failed to save proximity keys: {}", e);
+                }
+                let json = serde_json::to_string(&state.devices).unwrap();
+                if let Some(parent) = get_devices_path().parent() {
+                    if let Err(e) = tokio::fs::create_dir_all(&parent).await {
+                        error!("Failed to create directory for devices: {}", e);
+                        return;
                     }
                 }
-
-                if let Some(ref tx) = state.event_tx {
-                    let _ = tx.send(AACPEvent::ProximityKeys(keys));
+                if let Err(e) = tokio::fs::write(&get_devices_path(), json).await {
+                    error!("Failed to save devices: {}", e);
                 }
             },
             opcodes::STEM_PRESS => info!("Received Stem Press packet."),
