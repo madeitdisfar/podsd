@@ -913,7 +913,7 @@ impl MediaController {
                     debug!("No stored original volume to restore to on status 6");
                 }
             }
-            9 => {
+            7 => {
                 let mut maybe_original = None;
                 {
                     let mut state = self.state.lock().await;
@@ -922,7 +922,7 @@ impl MediaController {
                         state.conv_original_volume = None;
                         state.conv_conversation_started = false;
                     } else {
-                        debug!("Received status 9 but conversation was not started; ignoring restore");
+                        debug!("Received status 7 but conversation was not started; ignoring restore");
                         return;
                     }
                 }
@@ -931,9 +931,9 @@ impl MediaController {
                     tokio::task::spawn_blocking(move || {
                         transition_sink_volume(&sink_clone, orig)
                     }).await.unwrap_or(false);
-                    info!("Conversation end (9): restored volume to original {}", orig);
+                    info!("Conversation end (7): restored volume to original {}", orig);
                 } else {
-                    debug!("No stored original volume to restore to on status 9");
+                    debug!("No stored original volume to restore to on status 7");
                 }
             }
             _ => {
