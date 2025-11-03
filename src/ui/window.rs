@@ -1,9 +1,14 @@
+use std::collections::HashMap;
 use iced::widget::button::Style;
-use iced::widget::{button, column, container, pane_grid, text, Space};
-use iced::{daemon, window, Background, Element, Length, Subscription, Task, Theme};
+use iced::widget::{button, column, container, pane_grid, text, Space, combo_box, row, text_input};
+use iced::{daemon, window, Background, Border, Center, Color, Element, Length, Subscription, Task, Theme};
 use std::sync::Arc;
-use log::debug;
+use iced::border::Radius;
+use iced::overlay::menu;
+use log::{debug, error};
 use tokio::sync::{mpsc::UnboundedReceiver, Mutex};
+use crate::bluetooth::aacp::{DeviceData, DeviceInformation, DeviceType};
+use crate::utils::{get_devices_path, get_app_settings_path, MyTheme};
 
 pub fn start_ui(ui_rx: UnboundedReceiver<()>, start_minimized: bool) -> iced::Result {
     daemon(App::title, App::update, App::view)
@@ -17,6 +22,8 @@ pub struct App {
     panes: pane_grid::State<Pane>,
     selected_tab: Tab,
     ui_rx: Arc<Mutex<UnboundedReceiver<()>>>,
+    theme_state: combo_box::State<MyTheme>,
+    selected_theme: MyTheme,
 }
 
 #[derive(Debug, Clone)]
@@ -26,14 +33,13 @@ pub enum Message {
     Resized(pane_grid::ResizeEvent),
     SelectTab(Tab),
     OpenMainWindow,
+    ThemeSelected(MyTheme),
+    CopyToClipboard(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
-    Device1,
-    Device2,
-    Device3,
-    Device4,
+    Device(String),
     Settings,
 }
 
@@ -42,6 +48,7 @@ pub enum Pane {
     Sidebar,
     Content,
 }
+
 
 impl App {
     pub fn new(ui_rx: UnboundedReceiver<()>, start_minimized: bool) -> (Self, Task<Message>) {
@@ -62,12 +69,45 @@ impl App {
             (Some(id), open.map(Message::WindowOpened))
         };
 
+        let app_settings_path = get_app_settings_path();
+        let selected_theme = std::fs::read_to_string(&app_settings_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("theme").cloned())
+            .and_then(|t| serde_json::from_value(t).ok())
+            .unwrap_or(MyTheme::Dark);
+
         (
             Self {
                 window,
                 panes,
-                selected_tab: Tab::Device1,
+                selected_tab: Tab::Device("none".to_string()),
                 ui_rx,
+                theme_state: combo_box::State::new(vec![
+                    MyTheme::Light,
+                    MyTheme::Dark,
+                    MyTheme::Dracula,
+                    MyTheme::Nord,
+                    MyTheme::SolarizedLight,
+                    MyTheme::SolarizedDark,
+                    MyTheme::GruvboxLight,
+                    MyTheme::GruvboxDark,
+                    MyTheme::CatppuccinLatte,
+                    MyTheme::CatppuccinFrappe,
+                    MyTheme::CatppuccinMacchiato,
+                    MyTheme::CatppuccinMocha,
+                    MyTheme::TokyoNight,
+                    MyTheme::TokyoNightStorm,
+                    MyTheme::TokyoNightLight,
+                    MyTheme::KanagawaWave,
+                    MyTheme::KanagawaDragon,
+                    MyTheme::KanagawaLotus,
+                    MyTheme::Moonfly,
+                    MyTheme::Nightfly,
+                    MyTheme::Oxocarbon,
+                    MyTheme::Ferra,
+                ]),
+                selected_theme,
             },
             Task::batch(vec![open_task, wait_task]),
         )
@@ -104,7 +144,6 @@ impl App {
             Message::OpenMainWindow => {
                 if let Some(window_id) = self.window {
                     Task::batch(vec![
-                        window::minimize(window_id, false),
                         window::gain_focus(window_id),
                     ])
                 } else {
@@ -113,78 +152,369 @@ impl App {
                     open_task.map(Message::WindowOpened)
                 }
             }
+            Message::ThemeSelected(theme) => {
+                self.selected_theme = theme;
+                let app_settings_path = get_app_settings_path();
+                let settings = serde_json::json!({"theme": self.selected_theme});
+                debug!("Writing settings to {}: {}", app_settings_path.to_str().unwrap() , settings);
+                std::fs::write(app_settings_path, settings.to_string()).ok();
+                Task::none()
+            }
+            Message::CopyToClipboard(data) => {
+                iced::clipboard::write(data)
+            }
         }
     }
 
     fn view(&self, _id: window::Id) -> Element<'_, Message> {
+        let devices_json = std::fs::read_to_string(get_devices_path()).unwrap_or_else(|e| {
+            error!("Failed to read devices file: {}", e);
+            "{}".to_string()
+        });
+        let devices_list: HashMap<String, DeviceData> = serde_json::from_str(&devices_json).unwrap_or_else(|e| {
+            error!("Deserialization failed: {}", e);
+            HashMap::new()
+        });
         let pane_grid = pane_grid::PaneGrid::new(&self.panes, |_pane_id, pane, _is_maximized| {
             match pane {
                 Pane::Sidebar => {
-                    let create_tab_button = |tab: Tab, label: &str| -> Element<'_, Message> {
+                    let create_tab_button = |tab: Tab, label: &str, description: Option<&str>| -> Element<'_, Message> {
                         let label = label.to_string();
+                        let description = description.map(|d| d.to_string());
                         let is_selected = self.selected_tab == tab;
-                        let content = container(text(label).size(18)).padding(10);
+                        let mut col = column![text(label).size(18)];
+                        if let Some(desc) = description {
+                            col = col.push(text(desc).size(12));
+                        }
+                        let content = container(col)
+                            .padding(10);
                         let style = move |theme: &Theme, _status| {
                             if is_selected {
-                                Style::default()
-                                    .with_background(Background::Color(theme.palette().primary))
+                                let mut style = Style::default()
+                                    .with_background(theme.palette().primary);
+                                let mut border = Border::default();
+                                border.color = theme.palette().text;
+                                style.border = border.rounded(20);
+                                style
                             } else {
-                                let mut style = Style::default();
+                                let mut style = Style::default()
+                                    .with_background(theme.palette().primary.scale_alpha(0.1));
+                                let mut border = Border::default();
+                                border.color = theme.palette().primary.scale_alpha(0.1);
+                                style.border = border.rounded(10);
                                 style.text_color = theme.palette().text;
                                 style
                             }
                         };
                         button(content)
                             .style(style)
+                            .padding(5)
                             .on_press(Message::SelectTab(tab))
                             .width(Length::Fill)
                             .into()
                     };
 
-                    let devices = column![
-                        create_tab_button(Tab::Device1, "Device 1"),
-                        create_tab_button(Tab::Device2, "Device 2"),
-                        create_tab_button(Tab::Device3, "Device 3"),
-                        create_tab_button(Tab::Device4, "Device 4")
-                    ]
-                    .spacing(5);
+                    let mut devices = column!().spacing(4);
+                    let mut devices_vec: Vec<(String, DeviceData)> = devices_list.clone().into_iter().collect();
+                    devices_vec.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+                    for (mac, device) in devices_vec {
+                        let name = device.name.clone();
+                        let tab_button = create_tab_button(
+                            Tab::Device(mac.clone()),
+                            &name,
+                            Some(&mac)
+                        );
+                        devices = devices.push(tab_button);
+                    }
 
-                    let settings = create_tab_button(Tab::Settings, "Settings");
+                    let settings = create_tab_button(Tab::Settings, "Settings", None);
 
                     let content = column![
                         devices,
                         Space::with_height(Length::Fill),
                         settings
                     ]
-                    .spacing(5);
+                        .padding(12);
 
                     pane_grid::Content::new(content)
                 }
+                
                 Pane::Content => {
-                    let content_text = match self.selected_tab {
-                        Tab::Device1 => "Content for Device 1",
-                        Tab::Device2 => "Content for Device 2",
-                        Tab::Device3 => "Content for Device 3",
-                        Tab::Device4 => "Content for Device 4",
-                        Tab::Settings => "Settings content",
+                    let content = match &self.selected_tab {
+                        Tab::Device(id) => {
+                            if id == "none" {
+                                container(
+                                    text("Select a device".to_string()).size(16)
+                                )
+                                    .center_x(Length::Fill)
+                                    .center_y(Length::Fill)
+                            } else {
+                                let mut information_col = column![];
+
+                                let device_type = devices_list.get(id)
+                                    .map(|d| d.type_.clone()).unwrap();
+
+                                if device_type == DeviceType::AirPods {
+                                    let device_information = devices_list.get(id)
+                                        .and_then(|d| d.information.clone());
+                                    match device_information {
+                                        Some(DeviceInformation::AirPods(ref airpods_information)) => {
+                                            information_col = information_col
+                                                .push(text("Device Information").size(18).style(
+                                                    |theme: &Theme| {
+                                                        let mut style = text::Style::default();
+                                                        style.color = Some(theme.palette().primary);
+                                                        style
+                                                    }
+                                                ))
+                                                .push(Space::with_height(Length::from(10)))
+                                                .push(
+                                                    row![
+                                                        text("Model Number").size(16).style(
+                                                            |theme: &Theme| {
+                                                                let mut style = text::Style::default();
+                                                                style.color = Some(theme.palette().text);
+                                                                style
+                                                            }
+                                                        ),
+                                                        Space::with_width(Length::Fill),
+                                                        text(airpods_information.model_number.clone()).size(16)
+                                                    ]
+                                                )
+                                                .push(
+                                                    row![
+                                                        text("Manufacturer").size(16).style(
+                                                            |theme: &Theme| {
+                                                                let mut style = text::Style::default();
+                                                                style.color = Some(theme.palette().text);
+                                                                style
+                                                            }
+                                                        ),
+                                                        Space::with_width(Length::Fill),
+                                                        text(airpods_information.manufacturer.clone()).size(16)
+                                                    ]
+                                                )
+                                                .push(
+                                                    row![
+                                                        text("Serial Number").size(16).style(
+                                                            |theme: &Theme| {
+                                                                let mut style = text::Style::default();
+                                                                style.color = Some(theme.palette().text);
+                                                                style
+                                                            }
+                                                        ),
+                                                        Space::with_width(Length::Fill),
+                                                        button(
+                                                            text(
+                                                                airpods_information.serial_number.clone()
+                                                            )
+                                                            .size(16)
+                                                        )
+                                                            .style(
+                                                                |theme: &Theme, _status| {
+                                                                    let mut style = Style::default();
+                                                                    style.text_color = theme.palette().text;
+                                                                    style.background = Some(Background::Color(Color::TRANSPARENT));
+                                                                    style
+                                                                }
+                                                            )
+                                                            .padding(0)
+                                                            .on_press(Message::CopyToClipboard(airpods_information.serial_number.clone()))
+                                                    ]
+                                                )
+                                                .push(
+                                                    row![
+                                                        text("Left Serial Number").size(16).style(
+                                                            |theme: &Theme| {
+                                                                let mut style = text::Style::default();
+                                                                style.color = Some(theme.palette().text);
+                                                                style
+                                                            }
+                                                        ),
+                                                        Space::with_width(Length::Fill),
+                                                        button(
+                                                            text(
+                                                                airpods_information.left_serial_number.clone()
+                                                            )
+                                                            .size(16)
+                                                        )
+                                                            .style(
+                                                                |theme: &Theme, _status| {
+                                                                    let mut style = Style::default();
+                                                                    style.text_color = theme.palette().text;
+                                                                    style.background = Some(Background::Color(Color::TRANSPARENT));
+                                                                    style
+                                                                }
+                                                            )
+                                                            .padding(0)
+                                                            .on_press(Message::CopyToClipboard(airpods_information.left_serial_number.clone()))
+                                                    ]
+                                                )
+                                                .push(
+                                                    row![
+                                                        text("Right Serial Number").size(16).style(
+                                                            |theme: &Theme| {
+                                                                let mut style = text::Style::default();
+                                                                style.color = Some(theme.palette().text);
+                                                                style
+                                                            }
+                                                        ),
+                                                        Space::with_width(Length::Fill),
+                                                        button(
+                                                            text(
+                                                                airpods_information.right_serial_number.clone()
+                                                            )
+                                                            .size(16)
+                                                        )
+                                                            .style(
+                                                                |theme: &Theme, _status| {
+                                                                    let mut style = Style::default();
+                                                                    style.text_color = theme.palette().text;
+                                                                    style.background = Some(Background::Color(Color::TRANSPARENT));
+                                                                    style
+                                                                }
+                                                            )
+                                                            .padding(0)
+                                                            .on_press(Message::CopyToClipboard(airpods_information.right_serial_number.clone()))
+                                                    ]
+                                                )
+                                                .push(
+                                                    row![
+                                                        text("Version 1").size(16).style(
+                                                            |theme: &Theme| {
+                                                                let mut style = text::Style::default();
+                                                                style.color = Some(theme.palette().text);
+                                                                style
+                                                            }
+                                                        ),
+                                                        Space::with_width(Length::Fill),
+                                                        text(airpods_information.version1.clone()).size(16)
+                                                    ]
+                                                )
+                                                .push(
+                                                    row![
+                                                        text("Version 2").size(16).style(
+                                                            |theme: &Theme| {
+                                                                let mut style = text::Style::default();
+                                                                style.color = Some(theme.palette().text);
+                                                                style
+                                                            }
+                                                        ),
+                                                        Space::with_width(Length::Fill),
+                                                        text(airpods_information.version2.clone()).size(16)
+                                                    ]
+                                                )
+                                                .push(
+                                                    row![
+                                                        text("Version 3").size(16).style(
+                                                            |theme: &Theme| {
+                                                                let mut style = text::Style::default();
+                                                                style.color = Some(theme.palette().text);
+                                                                style
+                                                            }
+                                                        ),
+                                                        Space::with_width(Length::Fill),
+                                                        text(airpods_information.version3.clone()).size(16)
+                                                    ]
+                                                );
+                                            debug!("AirPods Information: {:?}", airpods_information);
+                                        }
+                                        _ => {
+                                            error!("Expected AirPodsInformation, got something else: {:?}", device_information);
+                                        },
+                                    }
+                                }
+                                container(
+                                    column![
+                                        container(information_col)
+                                            .style(
+                                                |theme: &Theme| {
+                                                    let mut style = container::Style::default();
+                                                    style.background = Some(Background::Color(theme.palette().primary.scale_alpha(0.1)));
+                                                    let mut border = Border::default();
+                                                    border.color = theme.palette().text;
+                                                    style.border = border.rounded(20);
+                                                    style
+                                                }
+                                            )
+                                            .padding(20)
+                                    ]
+                                )
+                                    .padding(20)
+                                    .center_x(Length::Fill)
+                                    .height(Length::Fill)
+                            }
+                        }
+                        Tab::Settings => {
+                            container(
+                                column![
+                                    text("Settings").size(40),
+                                    Space::with_height(Length::from(20)),
+                                    row![
+                                        text("Theme:")
+                                            .size(16),
+                                        Space::with_width(Length::from(10)),
+                                        combo_box(
+                                            &self.theme_state,
+                                            "Select theme",
+                                            Some(&self.selected_theme),
+                                            Message::ThemeSelected
+                                        )
+                                        .input_style(
+                                            |theme: &Theme, _status| {
+                                                text_input::Style {
+                                                    background: Background::Color(Color::TRANSPARENT),
+                                                    border: Border {
+                                                        width: 0.5,
+                                                        color: theme.palette().text,
+                                                        radius: Radius::from(10.0),
+                                                    },
+                                                    icon: Default::default(),
+                                                    placeholder: theme.palette().text.scale_alpha(0.5),
+                                                    value: theme.palette().text,
+                                                    selection: theme.palette().primary
+                                                }
+                                            }
+                                        )
+                                        .menu_style(
+                                            |theme: &Theme| {
+                                                menu::Style {
+                                                    background: Background::Color(Color::TRANSPARENT),
+                                                    border: Border {
+                                                        width: 0.5,
+                                                        color: theme.palette().text,
+                                                        radius: Radius::from(10.0)
+                                                    },
+                                                    text_color: theme.palette().text,
+                                                    selected_text_color: theme.palette().text,
+                                                    selected_background: Background::Color(theme.palette().primary.scale_alpha(0.3)),
+                                                }
+                                            }
+                                        )
+                                        .width(Length::Fill)
+                                    ]
+                                    .align_y(Center)
+                                ]
+                            )
+                                .padding(20)
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                        },
                     };
-                    let content = container(text(content_text).size(40))
-                        .center_x(Length::Fill)
-                        .center_y(Length::Fill);
 
                     pane_grid::Content::new(content)
                 }
             }
         })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .on_resize(20, Message::Resized);
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .on_resize(20, Message::Resized);
 
         container(pane_grid).into()
     }
 
     fn theme(&self, _id: window::Id) -> Theme {
-        Theme::Moonfly
+        self.selected_theme.into()
     }
 
     fn subscription(&self) -> Subscription<Message> {

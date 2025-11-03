@@ -9,17 +9,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::path::PathBuf;
+use crate::utils::get_devices_path;
 
 const PSM: u16 = 0x1001;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const HEADER_BYTES: [u8; 4] = [0x04, 0x00, 0x04, 0x00];
-
-fn get_devices_path() -> PathBuf {
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(data_dir).join("librepods").join("devices.json")
-}
 
 pub mod opcodes {
     pub const SET_FEATURE_FLAGS: u8 = 0x4D;
@@ -269,10 +264,17 @@ pub struct AirPodsInformation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum DeviceInformation {
+    AirPods(AirPodsInformation),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceData {
+    pub name: String,
     pub type_: DeviceType,
     pub le: LEData,
-    pub information: Option<AirPodsInformation>,
+    pub information: Option<DeviceInformation>,
 }
 
 pub struct AACPManagerState {
@@ -620,7 +622,8 @@ impl AACPManager {
                 let mut state = self.state.lock().await;
                 if let Some(mac) = state.airpods_mac {
                     if let Some(device_data) = state.devices.get_mut(&mac.to_string()) {
-                        device_data.information = Some(info.clone());
+                        device_data.name = info.name.clone();
+                        device_data.information = Some(DeviceInformation::AirPods(info.clone()));
                     }
                 }
                 let json = serde_json::to_string(&state.devices).unwrap();
@@ -668,6 +671,7 @@ impl AACPManager {
                         if let Some(mac) = state.airpods_mac {
                             let mac_str = mac.to_string();
                             let device_data = state.devices.entry(mac_str.clone()).or_insert(DeviceData {
+                                name: mac_str.clone(),
                                 type_: DeviceType::AirPods,
                                 le: LEData { irk: "".to_string(), enc_key: "".to_string() },
                                 information: None,

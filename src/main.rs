@@ -2,6 +2,7 @@ mod bluetooth;
 mod airpods;
 mod media_controller;
 mod ui;
+mod utils;
 
 use std::env;
 use log::info;
