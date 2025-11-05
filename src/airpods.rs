@@ -9,6 +9,7 @@ use ksni::Handle;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use crate::ui::tray::MyTray;
+use crate::ui::messages::UIMessage;
 
 pub struct AirPodsDevice {
     pub mac_address: Address,
@@ -18,7 +19,7 @@ pub struct AirPodsDevice {
 }
 
 impl AirPodsDevice {
-    pub async fn new(mac_address: Address, tray_handle: Option<Handle<MyTray>>) -> Self {
+    pub async fn new(mac_address: Address, tray_handle: Option<Handle<MyTray>>, ui_tx: tokio::sync::mpsc::UnboundedSender<UIMessage>) -> Self {
         info!("Creating new AirPodsDevice for {}", mac_address);
         let mut aacp_manager = AACPManager::new();
         aacp_manager.connect(mac_address).await;
@@ -146,7 +147,9 @@ impl AirPodsDevice {
         let aacp_manager_clone_events = aacp_manager.clone();
         let local_mac_events = local_mac.clone();
         tokio::spawn(async move {
+            let ui_tx_clone = ui_tx.clone();
             while let Some(event) = rx.recv().await {
+                let event_clone = event.clone();
                 match event {
                     AACPEvent::EarDetection(old_status, new_status) => {
                         debug!("Received EarDetection event: old_status={:?}, new_status={:?}", old_status, new_status);
@@ -178,9 +181,14 @@ impl AirPodsDevice {
                             }).await;
                         }
                         debug!("Updated tray with new battery info");
+
+                        let _ = ui_tx_clone.send(UIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
+                        debug!("Sent BatteryInfo event to UI");
                     }
                     AACPEvent::ControlCommand(status) => {
                         debug!("Received ControlCommand event: {:?}", status);
+                        let _ = ui_tx_clone.send(UIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
+                        debug!("Sent ControlCommand event to UI");
                     }
                     AACPEvent::ConversationalAwareness(status) => {
                         debug!("Received ConversationalAwareness event: {}", status);
@@ -218,7 +226,11 @@ impl AirPodsDevice {
                         controller.pause_all_media().await;
                         controller.deactivate_a2dp_profile().await;
                     }
-                    _ => {}
+                    _ => {
+                        debug!("Received unhandled AACP event: {:?}", event);
+                        let _ = ui_tx_clone.send(UIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
+                        debug!("Sent unhandled AACP event to UI");
+                    }
                 }
             }
         });

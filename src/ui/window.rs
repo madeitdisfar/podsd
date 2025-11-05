@@ -1,16 +1,19 @@
+
 use std::collections::HashMap;
 use iced::widget::button::Style;
 use iced::widget::{button, column, container, pane_grid, text, Space, combo_box, row, text_input};
-use iced::{daemon, window, Background, Border, Center, Color, Element, Length, Subscription, Task, Theme};
+use iced::{daemon, window, Background, Border, Center, Color, Element, Length, Size, Subscription, Task, Theme};
 use std::sync::Arc;
 use iced::border::Radius;
 use iced::overlay::menu;
 use log::{debug, error};
-use tokio::sync::{mpsc::UnboundedReceiver, Mutex};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::Mutex;
 use crate::bluetooth::aacp::{DeviceData, DeviceInformation, DeviceType};
+use crate::ui::messages::UIMessage;
 use crate::utils::{get_devices_path, get_app_settings_path, MyTheme};
 
-pub fn start_ui(ui_rx: UnboundedReceiver<()>, start_minimized: bool) -> iced::Result {
+pub fn start_ui(ui_rx: UnboundedReceiver<UIMessage>, start_minimized: bool) -> iced::Result {
     daemon(App::title, App::update, App::view)
         .subscription(App::subscription)
         .theme(App::theme)
@@ -21,9 +24,22 @@ pub struct App {
     window: Option<window::Id>,
     panes: pane_grid::State<Pane>,
     selected_tab: Tab,
-    ui_rx: Arc<Mutex<UnboundedReceiver<()>>>,
     theme_state: combo_box::State<MyTheme>,
     selected_theme: MyTheme,
+    ui_rx: Arc<Mutex<UnboundedReceiver<UIMessage>>>,
+    bluetooth_state: BluetoothState
+}
+
+pub struct BluetoothState {
+    connected_devices: Vec<String>
+}
+
+impl BluetoothState {
+    pub fn new() -> Self {
+        Self {
+            connected_devices: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -32,9 +48,9 @@ pub enum Message {
     WindowClosed(window::Id),
     Resized(pane_grid::ResizeEvent),
     SelectTab(Tab),
-    OpenMainWindow,
     ThemeSelected(MyTheme),
     CopyToClipboard(String),
+    UIMessage(UIMessage),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -51,21 +67,25 @@ pub enum Pane {
 
 
 impl App {
-    pub fn new(ui_rx: UnboundedReceiver<()>, start_minimized: bool) -> (Self, Task<Message>) {
+    pub fn new(ui_rx: UnboundedReceiver<UIMessage>, start_minimized: bool) -> (Self, Task<Message>) {
         let (mut panes, first_pane) = pane_grid::State::new(Pane::Sidebar);
         let split = panes.split(pane_grid::Axis::Vertical, first_pane, Pane::Content);
         panes.resize(split.unwrap().1, 0.2);
 
         let ui_rx = Arc::new(Mutex::new(ui_rx));
+
         let wait_task = Task::perform(
             wait_for_message(Arc::clone(&ui_rx)),
-            |_| Message::OpenMainWindow,
+            |msg| msg,
         );
 
         let (window, open_task) = if start_minimized {
             (None, Task::none())
         } else {
-            let (id, open) = window::open(window::Settings::default());
+            let mut settings = window::Settings::default();
+            settings.min_size = Some(Size::new(400.0, 300.0));
+            settings.icon = window::icon::from_file("../../assets/icon.png").ok();
+            let (id, open) = window::open(settings);
             (Some(id), open.map(Message::WindowOpened))
         };
 
@@ -77,12 +97,13 @@ impl App {
             .and_then(|t| serde_json::from_value(t).ok())
             .unwrap_or(MyTheme::Dark);
 
+        let bluetooth_state = BluetoothState::new();
+
         (
             Self {
                 window,
                 panes,
                 selected_tab: Tab::Device("none".to_string()),
-                ui_rx,
                 theme_state: combo_box::State::new(vec![
                     MyTheme::Light,
                     MyTheme::Dark,
@@ -108,8 +129,10 @@ impl App {
                     MyTheme::Ferra,
                 ]),
                 selected_theme,
+                ui_rx,
+                bluetooth_state,
             },
-            Task::batch(vec![open_task, wait_task]),
+            Task::batch(vec![open_task, wait_task])
         )
     }
 
@@ -127,11 +150,7 @@ impl App {
                 if self.window == Some(id) {
                     self.window = None;
                 }
-                let wait_task = Task::perform(
-                    wait_for_message(Arc::clone(&self.ui_rx)),
-                    |_| Message::OpenMainWindow,
-                );
-                wait_task
+                Task::none()
             }
             Message::Resized(event) => {
                 self.panes.resize(event.split, event.ratio);
@@ -140,17 +159,6 @@ impl App {
             Message::SelectTab(tab) => {
                 self.selected_tab = tab;
                 Task::none()
-            }
-            Message::OpenMainWindow => {
-                if let Some(window_id) = self.window {
-                    Task::batch(vec![
-                        window::gain_focus(window_id),
-                    ])
-                } else {
-                    let (new_window_task, open_task) = window::open(window::Settings::default());
-                    self.window = Some(new_window_task);
-                    open_task.map(Message::WindowOpened)
-                }
             }
             Message::ThemeSelected(theme) => {
                 self.selected_theme = theme;
@@ -162,6 +170,86 @@ impl App {
             }
             Message::CopyToClipboard(data) => {
                 iced::clipboard::write(data)
+            }
+            Message::UIMessage(ui_message) => {
+                match ui_message {
+                    UIMessage::NoOp => {
+                        let ui_rx = Arc::clone(&self.ui_rx);
+                        let wait_task = Task::perform(
+                            wait_for_message(ui_rx),
+                            |msg| msg,
+                        );
+                        wait_task
+                    }
+                    UIMessage::OpenWindow => {
+                        let ui_rx = Arc::clone(&self.ui_rx);
+                        let wait_task = Task::perform(
+                            wait_for_message(ui_rx),
+                            |msg| msg,
+                        );
+                        debug!("Opening main window...");
+                        if let Some(window_id) = self.window {
+                            Task::batch(vec![
+                                window::gain_focus(window_id),
+                                wait_task,
+                            ])
+                        } else {
+                            let mut settings = window::Settings::default();
+                            settings.min_size = Some(Size::new(400.0, 300.0));
+                            settings.icon = window::icon::from_file("../../assets/icon.png").ok();
+                            let (new_window_task, open_task) = window::open(settings);
+                            self.window = Some(new_window_task);
+                            Task::batch(vec![
+                                open_task.map(Message::WindowOpened),
+                                wait_task,
+                            ])
+                        }
+                    }
+                    UIMessage::DeviceConnected(mac) => {
+                        let ui_rx = Arc::clone(&self.ui_rx);
+                        let wait_task = Task::perform(
+                            wait_for_message(ui_rx),
+                            |msg| msg,
+                        );
+                        debug!("Device connected: {}. Adding to connected devices list", mac);
+                        let mut already_connected = false;
+                        for device in &self.bluetooth_state.connected_devices {
+                            if device == &mac {
+                                already_connected = true;
+                                break;
+                            }
+                        }
+                        if !already_connected {
+                            self.bluetooth_state.connected_devices.push(mac.clone());
+                        }
+
+                        Task::batch(vec![
+                            wait_task,
+                        ])
+                    }
+                    UIMessage::DeviceDisconnected(mac) => {
+                        let ui_rx = Arc::clone(&self.ui_rx);
+                        let wait_task = Task::perform(
+                            wait_for_message(ui_rx),
+                            |msg| msg,
+                        );
+                        debug!("Device disconnected: {}", mac);
+                        Task::batch(vec![
+                            wait_task,
+                        ])
+                    }
+                    UIMessage::AACPUIEvent(mac, event) => {
+                        let ui_rx = Arc::clone(&self.ui_rx);
+                        let wait_task = Task::perform(
+                            wait_for_message(ui_rx),
+                            |msg| msg,
+                        );
+                        debug!("AACP UI Event for {}: {:?}", mac, event);
+                        Task::batch(vec![
+                            wait_task,
+                        ])
+                    }
+                }
             }
         }
     }
@@ -178,30 +266,35 @@ impl App {
         let pane_grid = pane_grid::PaneGrid::new(&self.panes, |_pane_id, pane, _is_maximized| {
             match pane {
                 Pane::Sidebar => {
-                    let create_tab_button = |tab: Tab, label: &str, description: Option<&str>| -> Element<'_, Message> {
+                    let create_tab_button = |tab: Tab, label: &str, description: &str, connected: bool| -> Element<'_, Message> {
                         let label = label.to_string();
-                        let description = description.map(|d| d.to_string());
                         let is_selected = self.selected_tab == tab;
-                        let mut col = column![text(label).size(18)];
-                        if let Some(desc) = description {
-                            col = col.push(text(desc).size(12));
-                        }
+                        let col = column![
+                            text(label).size(16),
+                            text(
+                                if connected {
+                                    format!("Connected - {}", description)
+                                } else {
+                                    format!("{}", description)
+                                }
+                            ).size(12)
+                        ];
                         let content = container(col)
-                            .padding(10);
+                            .padding(8);
                         let style = move |theme: &Theme, _status| {
                             if is_selected {
                                 let mut style = Style::default()
                                     .with_background(theme.palette().primary);
                                 let mut border = Border::default();
                                 border.color = theme.palette().text;
-                                style.border = border.rounded(20);
+                                style.border = border.rounded(12);
                                 style
                             } else {
                                 let mut style = Style::default()
                                     .with_background(theme.palette().primary.scale_alpha(0.1));
                                 let mut border = Border::default();
                                 border.color = theme.palette().primary.scale_alpha(0.1);
-                                style.border = border.rounded(10);
+                                style.border = border.rounded(8);
                                 style.text_color = theme.palette().text;
                                 style
                             }
@@ -214,6 +307,38 @@ impl App {
                             .into()
                     };
 
+                    let create_settings_button = || -> Element<'_, Message> {
+                        let label = "Settings".to_string();
+                        let is_selected = self.selected_tab == Tab::Settings;
+                        let col = column![text(label).size(16)];
+                        let content = container(col)
+                            .padding(8);
+                        let style = move |theme: &Theme, _status| {
+                            if is_selected {
+                                let mut style = Style::default()
+                                    .with_background(theme.palette().primary);
+                                let mut border = Border::default();
+                                border.color = theme.palette().text;
+                                style.border = border.rounded(12);
+                                style
+                            } else {
+                                let mut style = Style::default()
+                                    .with_background(theme.palette().primary.scale_alpha(0.1));
+                                let mut border = Border::default();
+                                border.color = theme.palette().primary.scale_alpha(0.1);
+                                style.border = border.rounded(8);
+                                style.text_color = theme.palette().text;
+                                style
+                            }
+                        };
+                        button(content)
+                            .style(style)
+                            .padding(5)
+                            .on_press(Message::SelectTab(Tab::Settings))
+                            .width(Length::Fill)
+                            .into()
+                    };
+
                     let mut devices = column!().spacing(4);
                     let mut devices_vec: Vec<(String, DeviceData)> = devices_list.clone().into_iter().collect();
                     devices_vec.sort_by(|a, b| a.1.name.cmp(&b.1.name));
@@ -222,12 +347,13 @@ impl App {
                         let tab_button = create_tab_button(
                             Tab::Device(mac.clone()),
                             &name,
-                            Some(&mac)
+                            &mac,
+                            self.bluetooth_state.connected_devices.contains(&mac)
                         );
                         devices = devices.push(tab_button);
                     }
 
-                    let settings = create_tab_button(Tab::Settings, "Settings", None);
+                    let settings = create_settings_button();
 
                     let content = column![
                         devices,
@@ -522,8 +648,15 @@ impl App {
     }
 }
 
-async fn wait_for_message(rx: Arc<Mutex<UnboundedReceiver<()>>>) {
-    debug!("Waiting for message to open main window...");
-    let mut guard = rx.lock().await;
-    let _ = guard.recv().await;
+async fn wait_for_message(
+    ui_rx: Arc<Mutex<UnboundedReceiver<UIMessage>>>,
+) -> Message {
+    let mut rx = ui_rx.lock().await;
+    match rx.recv().await {
+        Some(msg) => Message::UIMessage(msg),
+        None => {
+            error!("UI message channel closed");
+            Message::UIMessage(UIMessage::NoOp)
+        }
+    }
 }

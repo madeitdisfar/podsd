@@ -19,6 +19,7 @@ use crate::ui::tray::MyTray;
 use clap::Parser;
 use crate::bluetooth::le::start_le_monitor;
 use tokio::sync::mpsc::unbounded_channel;
+use crate::ui::messages::UIMessage;
 
 #[derive(Parser)]
 struct Args {
@@ -34,11 +35,11 @@ fn main() -> iced::Result {
     let args = Args::parse();
     let log_level = if args.debug { "debug" } else { "info" };
     if env::var("RUST_LOG").is_err() {
-        unsafe { env::set_var("RUST_LOG", log_level); }
+        unsafe { env::set_var("RUST_LOG", log_level.to_owned() + ",wgpu_core=off,librepods_rust::bluetooth::le=off,cosmic_text=off,naga=off,iced_winit=off") };
     }
     env_logger::init();
 
-    let (ui_tx, ui_rx) = unbounded_channel::<()>();
+    let (ui_tx, ui_rx) = unbounded_channel::<UIMessage>();
     std::thread::spawn(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async_main(ui_tx)).unwrap();
@@ -48,7 +49,7 @@ fn main() -> iced::Result {
 }
 
 
-async fn async_main(ui_tx: tokio::sync::mpsc::UnboundedSender<()>) -> bluer::Result<()> {
+async fn async_main(ui_tx: tokio::sync::mpsc::UnboundedSender<UIMessage>) -> bluer::Result<()> {
     let args = Args::parse();
 
     let tray_handle = if args.no_tray {
@@ -66,7 +67,7 @@ async fn async_main(ui_tx: tokio::sync::mpsc::UnboundedSender<()>) -> bluer::Res
             listening_mode: None,
             allow_off_option: None,
             command_tx: None,
-            ui_tx: Some(ui_tx),
+            ui_tx: Some(ui_tx.clone()),
         };
         let handle = tray.spawn().await.unwrap();
         Some(handle)
@@ -91,7 +92,9 @@ async fn async_main(ui_tx: tokio::sync::mpsc::UnboundedSender<()>) -> bluer::Res
         Ok(device) => {
             let name = device.name().await?.unwrap_or_else(|| "Unknown".to_string());
             info!("Found connected AirPods: {}, initializing.", name);
-            let _airpods_device = AirPodsDevice::new(device.address(), tray_handle.clone()).await;
+            let ui_tx_clone = ui_tx.clone();
+            ui_tx_clone.send(UIMessage::DeviceConnected(device.address().to_string())).unwrap();
+            let _airpods_device = AirPodsDevice::new(device.address(), tray_handle.clone(), ui_tx_clone).await;
         }
         Err(_) => {
             info!("No connected AirPods found.");
@@ -128,8 +131,10 @@ async fn async_main(ui_tx: tokio::sync::mpsc::UnboundedSender<()>) -> bluer::Res
         let Ok(addr) = addr_str.parse::<Address>() else { return true; };
         info!("AirPods connected: {}, initializing", name);
         let handle_clone = tray_handle.clone();
+        let ui_tx_clone = ui_tx.clone();
         tokio::spawn(async move {
-            let _airpods_device = AirPodsDevice::new(addr, handle_clone).await;
+            ui_tx_clone.send(UIMessage::DeviceConnected(addr_str)).unwrap();
+            let _airpods_device = AirPodsDevice::new(addr, handle_clone, ui_tx_clone).await;
         });
         true
     })?;

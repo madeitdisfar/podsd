@@ -8,7 +8,6 @@ use tokio::time::{sleep, Instant};
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::path::PathBuf;
 use crate::utils::get_devices_path;
 
 const PSM: u16 = 0x1001;
@@ -124,6 +123,49 @@ impl ControlCommandIdentifiers {
             0x06 => Some(Self::OwnsConnection),
             _ => None,
         }
+    }
+}
+
+impl std::fmt::Display for ControlCommandIdentifiers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            ControlCommandIdentifiers::MicMode => "Mic Mode",
+            ControlCommandIdentifiers::ButtonSendMode => "Button Send Mode",
+            ControlCommandIdentifiers::VoiceTrigger => "Voice Trigger",
+            ControlCommandIdentifiers::SingleClickMode => "Single Click Mode",
+            ControlCommandIdentifiers::DoubleClickMode => "Double Click Mode",
+            ControlCommandIdentifiers::ClickHoldMode => "Click Hold Mode",
+            ControlCommandIdentifiers::DoubleClickInterval => "Double Click Interval",
+            ControlCommandIdentifiers::ClickHoldInterval => "Click Hold Interval",
+            ControlCommandIdentifiers::ListeningModeConfigs => "Listening Mode Configs",
+            ControlCommandIdentifiers::OneBudAncMode => "One Bud ANC Mode",
+            ControlCommandIdentifiers::CrownRotationDirection => "Crown Rotation Direction",
+            ControlCommandIdentifiers::ListeningMode => "Listening Mode",
+            ControlCommandIdentifiers::AutoAnswerMode => "Auto Answer Mode",
+            ControlCommandIdentifiers::ChimeVolume => "Chime Volume",
+            ControlCommandIdentifiers::VolumeSwipeInterval => "Volume Swipe Interval",
+            ControlCommandIdentifiers::CallManagementConfig => "Call Management Config",
+            ControlCommandIdentifiers::VolumeSwipeMode => "Volume Swipe Mode",
+            ControlCommandIdentifiers::AdaptiveVolumeConfig => "Adaptive Volume Config",
+            ControlCommandIdentifiers::SoftwareMuteConfig => "Software Mute Config",
+            ControlCommandIdentifiers::ConversationDetectConfig => "Conversation Detect Config",
+            ControlCommandIdentifiers::Ssl => "SSL",
+            ControlCommandIdentifiers::HearingAid => "Hearing Aid",
+            ControlCommandIdentifiers::AutoAncStrength => "Auto ANC Strength",
+            ControlCommandIdentifiers::HpsGainSwipe => "HPS Gain Swipe",
+            ControlCommandIdentifiers::HrmState => "HRM State",
+            ControlCommandIdentifiers::InCaseToneConfig => "In Case Tone Config",
+            ControlCommandIdentifiers::SiriMultitoneConfig => "Siri Multitone Config",
+            ControlCommandIdentifiers::HearingAssistConfig => "Hearing Assist Config",
+            ControlCommandIdentifiers::AllowOffOption => "Allow Off Option",
+            ControlCommandIdentifiers::StemConfig => "Stem Config",
+            ControlCommandIdentifiers::SleepDetectionConfig => "Sleep Detection Config",
+            ControlCommandIdentifiers::AllowAutoConnect => "Allow Auto Connect",
+            ControlCommandIdentifiers::EarDetectionConfig => "Ear Detection Config",
+            ControlCommandIdentifiers::AutomaticConnectionConfig => "Automatic Connection Config",
+            ControlCommandIdentifiers::OwnsConnection => "Owns Connection",
+        };
+        write!(f, "{}", name)
     }
 }
 
