@@ -1,4 +1,3 @@
-use std::cmp::PartialEq;
 use bluer::monitor::{Monitor, MonitorEvent, Pattern};
 use bluer::{Address, Session};
 use aes::Aes128;
@@ -14,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::bluetooth::aacp::BatteryStatus;
 use crate::ui::tray::MyTray;
-use crate::bluetooth::aacp::{DeviceData, DeviceType};
+use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
 use crate::utils::{get_devices_path, get_preferences_path, ah};
 
 fn decrypt(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
@@ -41,14 +40,6 @@ fn verify_rpa(addr: &str, irk: &[u8; 16]) -> bool {
     let computed_hash = ah(irk, &prand);
     debug!("Verifying RPA: addr={}, hash={:?}, computed_hash={:?}", addr, hash, computed_hash);
     hash == computed_hash
-}
-
-impl PartialEq for DeviceType {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (DeviceType::AirPods, DeviceType::AirPods) => true
-        }
-    }
 }
 
 pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> bluer::Result<()> {
@@ -107,15 +98,17 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
                 let mut found_mac = None;
                 for (airpods_mac, device_data) in &all_devices {
                     if device_data.type_ == DeviceType::AirPods {
-                        if let Ok(irk_bytes) = hex::decode(&device_data.le.irk) {
-                            if irk_bytes.len() == 16 {
-                                let irk: [u8; 16] = irk_bytes.as_slice().try_into().unwrap();
-                                debug!("Verifying RPA {} for airpods MAC {} with IRK {}", addr_str, airpods_mac, device_data.le.irk);
-                                if verify_rpa(&addr_str, &irk) {
-                                    info!("Matched our device ({}) with the irk for {}", addr, airpods_mac);
-                                    verified_macs.insert(addr, airpods_mac.clone());
-                                    found_mac = Some(airpods_mac.clone());
-                                    break;
+                        if let Some(DeviceInformation::AirPods(info)) = &device_data.information {
+                            if let Ok(irk_bytes) = hex::decode(&info.le_keys.irk) {
+                                if irk_bytes.len() == 16 {
+                                    let irk: [u8; 16] = irk_bytes.as_slice().try_into().unwrap();
+                                    debug!("Verifying RPA {} for airpods MAC {} with IRK {}", addr_str, airpods_mac, info.le_keys.irk);
+                                    if verify_rpa(&addr_str, &irk) {
+                                        info!("Matched our device ({}) with the irk for {}", addr, airpods_mac);
+                                        verified_macs.insert(addr, airpods_mac.clone());
+                                        found_mac = Some(airpods_mac.clone());
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -133,8 +126,8 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
 
             if let Some(ref mac) = matched_airpods_mac {
                 if let Some(device_data) = all_devices.get(mac) {
-                    if !device_data.le.enc_key.is_empty() {
-                        if let Ok(enc_key_bytes) = hex::decode(&device_data.le.enc_key) {
+                    if let Some(DeviceInformation::AirPods(info)) = &device_data.information {
+                        if let Ok(enc_key_bytes) = hex::decode(&info.le_keys.enc_key) {
                             if enc_key_bytes.len() == 16 {
                                 matched_enc_key = Some(enc_key_bytes.as_slice().try_into().unwrap());
                             }

@@ -16,29 +16,34 @@ const OPCODE_READ_REQUEST: u8 = 0x0A;
 const OPCODE_WRITE_REQUEST: u8 = 0x12;
 const OPCODE_HANDLE_VALUE_NTF: u8 = 0x1B;
 const OPCODE_WRITE_RESPONSE: u8 = 0x13;
+const RESPONSE_TIMEOUT: u64 = 5000;
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ATTHandles {
-    Transparency = 0x18,
-    LoudSoundReduction = 0x1B,
-    HearingAid = 0x2A,
+    AirPodsTransparency = 0x18,
+    AirPodsLoudSoundReduction = 0x1B,
+    AirPodsHearingAid = 0x2A,
+    NothingEverything = 0x8002,
+    NothingEverythingRead = 0x8005 // for some reason, and not the same as the write handle
 }
 
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ATTCCCDHandles {
-    Transparency = ATTHandles::Transparency as u16 + 1,
-    LoudSoundReduction = ATTHandles::LoudSoundReduction as u16 + 1,
-    HearingAid = ATTHandles::HearingAid as u16 + 1,
+    Transparency = ATTHandles::AirPodsTransparency as u16 + 1,
+    LoudSoundReduction = ATTHandles::AirPodsLoudSoundReduction as u16 + 1,
+    HearingAid = ATTHandles::AirPodsHearingAid as u16 + 1,
 }
 
 impl From<ATTHandles> for ATTCCCDHandles {
     fn from(handle: ATTHandles) -> Self {
         match handle {
-            ATTHandles::Transparency => ATTCCCDHandles::Transparency,
-            ATTHandles::LoudSoundReduction => ATTCCCDHandles::LoudSoundReduction,
-            ATTHandles::HearingAid => ATTCCCDHandles::HearingAid,
+            ATTHandles::AirPodsTransparency => ATTCCCDHandles::Transparency,
+            ATTHandles::AirPodsLoudSoundReduction => ATTCCCDHandles::LoudSoundReduction,
+            ATTHandles::AirPodsHearingAid => ATTCCCDHandles::HearingAid,
+            ATTHandles::NothingEverything => panic!("No CCCD for NothingEverything handle"), // we don't request it
+            ATTHandles::NothingEverythingRead => panic!("No CCD for NothingEverythingRead handle") // it sends notifications without CCCD
         }
     }
 }
@@ -46,18 +51,13 @@ impl From<ATTHandles> for ATTCCCDHandles {
 struct ATTManagerState {
     sender: Option<mpsc::Sender<Vec<u8>>>,
     listeners: HashMap<u16, Vec<mpsc::UnboundedSender<Vec<u8>>>>,
-    responses: mpsc::UnboundedReceiver<Vec<u8>>,
-    response_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl ATTManagerState {
     fn new() -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
         ATTManagerState {
             sender: None,
-            listeners: HashMap::new(),
-            responses: rx,
-            response_tx: tx,
+            listeners: HashMap::new()
         }
     }
 }
@@ -65,13 +65,18 @@ impl ATTManagerState {
 #[derive(Clone)]
 pub struct ATTManager {
     state: Arc<Mutex<ATTManagerState>>,
+    response_rx: Arc<Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
+    response_tx: mpsc::UnboundedSender<Vec<u8>>,
     tasks: Arc<Mutex<JoinSet<()>>>,
 }
 
 impl ATTManager {
     pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
         ATTManager {
             state: Arc::new(Mutex::new(ATTManagerState::new())),
+            response_rx: Arc::new(Mutex::new(rx)),
+            response_tx: tx,
             tasks: Arc::new(Mutex::new(JoinSet::new())),
         }
     }
@@ -184,11 +189,18 @@ impl ATTManager {
     }
 
     async fn read_response(&self) -> Result<Vec<u8>> {
-        let mut state = self.state.lock().await;
-        match tokio::time::timeout(Duration::from_millis(2000), state.responses.recv()).await {
+        debug!("Waiting for response...");
+        let mut rx = self.response_rx.lock().await;
+        match tokio::time::timeout(Duration::from_millis(RESPONSE_TIMEOUT), rx.recv()).await {
             Ok(Some(resp)) => Ok(resp),
-            Ok(None) => Err(Error::from(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "Response channel closed"))),
-            Err(_) => Err(Error::from(std::io::Error::new(std::io::ErrorKind::TimedOut, "Response timeout"))),
+            Ok(None) => Err(Error::from(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Response channel closed"
+            ))),
+            Err(_) => Err(Error::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Response timeout"
+            ))),
         }
     }
 }
@@ -217,10 +229,11 @@ async fn recv_thread(manager: ATTManager, sp: Arc<SeqPacket>) {
                             let _ = listener.send(value.clone());
                         }
                     }
+                } else if data[0] == OPCODE_WRITE_RESPONSE {
+                    let _ = manager.response_tx.send(vec![]);
                 } else {
                     // Response
-                    let state = manager.state.lock().await;
-                    let _ = state.response_tx.send(data[1..].to_vec());
+                    let _ = manager.response_tx.send(data[1..].to_vec());
                 }
             }
             Err(e) => {

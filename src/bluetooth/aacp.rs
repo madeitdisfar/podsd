@@ -8,6 +8,8 @@ use tokio::time::{sleep, Instant};
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use crate::devices::airpods::AirPodsInformation;
+use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
 use crate::utils::get_devices_path;
 
 const PSM: u16 = 0x1001;
@@ -280,43 +282,9 @@ pub enum AACPEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum DeviceType {
-    AirPods,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LEData {
+pub struct AirPodsLEKeys {
     pub irk: String,
     pub enc_key: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AirPodsInformation {
-    pub name: String,
-    pub model_number: String,
-    pub manufacturer: String,
-    pub serial_number: String,
-    pub version1: String,
-    pub version2: String,
-    pub hardware_revision: String,
-    pub updater_identifier: String,
-    pub left_serial_number: String,
-    pub right_serial_number: String,
-    pub version3: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data")]
-pub enum DeviceInformation {
-    AirPods(AirPodsInformation),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeviceData {
-    pub name: String,
-    pub type_: DeviceType,
-    pub le: LEData,
-    pub information: Option<DeviceInformation>,
 }
 
 pub struct AACPManagerState {
@@ -647,7 +615,7 @@ impl AACPManager {
                         strings.push(s.to_string());
                     }
                 }
-                strings.remove(0); // Remove the first empty string as per comment
+                strings.remove(0);
                 let info = AirPodsInformation {
                     name: strings.get(0).cloned().unwrap_or_default(),
                     model_number: strings.get(1).cloned().unwrap_or_default(),
@@ -660,6 +628,10 @@ impl AACPManager {
                     left_serial_number: strings.get(8).cloned().unwrap_or_default(),
                     right_serial_number: strings.get(9).cloned().unwrap_or_default(),
                     version3: strings.get(10).cloned().unwrap_or_default(),
+                    le_keys: AirPodsLEKeys {
+                        irk: "".to_string(),
+                        enc_key: "".to_string(),
+                    },
                 };
                 let mut state = self.state.lock().await;
                 if let Some(mac) = state.airpods_mac {
@@ -715,12 +687,29 @@ impl AACPManager {
                             let device_data = state.devices.entry(mac_str.clone()).or_insert(DeviceData {
                                 name: mac_str.clone(),
                                 type_: DeviceType::AirPods,
-                                le: LEData { irk: "".to_string(), enc_key: "".to_string() },
                                 information: None,
                             });
                             match kt {
-                                ProximityKeyType::Irk => device_data.le.irk = hex::encode(key_data),
-                                ProximityKeyType::EncKey => device_data.le.enc_key = hex::encode(key_data),
+                                ProximityKeyType::Irk => {
+                                    match device_data.information.as_mut() {
+                                        Some(DeviceInformation::AirPods(info)) => {
+                                            info.le_keys.irk = hex::encode(key_data);
+                                        }
+                                        _ => {
+                                            error!("Device information is not AirPods for adding LE IRK.");
+                                        }
+                                    }
+                                }
+                                ProximityKeyType::EncKey => {
+                                    match device_data.information.as_mut() {
+                                        Some(DeviceInformation::AirPods(info)) => {
+                                            info.le_keys.enc_key = hex::encode(key_data);
+                                        }
+                                        _ => {
+                                            error!("Device information is not AirPods for adding LE encryption key.");
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

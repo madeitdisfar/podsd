@@ -1,4 +1,4 @@
-use crate::bluetooth::aacp::{AACPManager, ProximityKeyType, AACPEvent};
+use crate::bluetooth::aacp::{AACPManager, ProximityKeyType, AACPEvent, AirPodsLEKeys};
 use crate::bluetooth::aacp::ControlCommandIdentifiers;
 // use crate::bluetooth::att::ATTManager;
 use crate::media_controller::MediaController;
@@ -6,20 +6,26 @@ use bluer::Address;
 use log::{debug, info, error};
 use std::sync::Arc;
 use ksni::Handle;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use crate::ui::tray::MyTray;
-use crate::ui::messages::UIMessage;
+use crate::ui::messages::BluetoothUIMessage;
 
 pub struct AirPodsDevice {
     pub mac_address: Address,
     pub aacp_manager: AACPManager,
     // pub att_manager: ATTManager,
     pub media_controller: Arc<Mutex<MediaController>>,
+    // pub command_tx: Option<tokio::sync::mpsc::UnboundedSender<(ControlCommandIdentifiers, Vec<u8>)>>,
 }
 
 impl AirPodsDevice {
-    pub async fn new(mac_address: Address, tray_handle: Option<Handle<MyTray>>, ui_tx: tokio::sync::mpsc::UnboundedSender<UIMessage>) -> Self {
+    pub async fn new(
+        mac_address: Address,
+        tray_handle: Option<Handle<MyTray>>,
+        ui_tx: tokio::sync::mpsc::UnboundedSender<BluetoothUIMessage>,
+    ) -> Self {
         info!("Creating new AirPodsDevice for {}", mac_address);
         let mut aacp_manager = AACPManager::new();
         aacp_manager.connect(mac_address).await;
@@ -146,8 +152,9 @@ impl AirPodsDevice {
 
         let aacp_manager_clone_events = aacp_manager.clone();
         let local_mac_events = local_mac.clone();
+        let ui_tx_clone = ui_tx.clone();
+        let command_tx_clone = command_tx.clone();
         tokio::spawn(async move {
-            let ui_tx_clone = ui_tx.clone();
             while let Some(event) = rx.recv().await {
                 let event_clone = event.clone();
                 match event {
@@ -182,12 +189,12 @@ impl AirPodsDevice {
                         }
                         debug!("Updated tray with new battery info");
 
-                        let _ = ui_tx_clone.send(UIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
+                        let _ = ui_tx_clone.send(BluetoothUIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
                         debug!("Sent BatteryInfo event to UI");
                     }
                     AACPEvent::ControlCommand(status) => {
                         debug!("Received ControlCommand event: {:?}", status);
-                        let _ = ui_tx_clone.send(UIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
+                        let _ = ui_tx_clone.send(BluetoothUIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
                         debug!("Sent ControlCommand event to UI");
                     }
                     AACPEvent::ConversationalAwareness(status) => {
@@ -221,14 +228,14 @@ impl AirPodsDevice {
                     }
                     AACPEvent::OwnershipToFalseRequest => {
                         info!("Received ownership to false request. Setting ownership to false and pausing media.");
-                        let _ = command_tx.send((ControlCommandIdentifiers::OwnsConnection, vec![0x00]));
+                        let _ = command_tx_clone.send((ControlCommandIdentifiers::OwnsConnection, vec![0x00]));
                         let controller = mc_clone.lock().await;
                         controller.pause_all_media().await;
                         controller.deactivate_a2dp_profile().await;
                     }
                     _ => {
                         debug!("Received unhandled AACP event: {:?}", event);
-                        let _ = ui_tx_clone.send(UIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
+                        let _ = ui_tx_clone.send(BluetoothUIMessage::AACPUIEvent(mac_address.to_string(), event_clone));
                         debug!("Sent unhandled AACP event to UI");
                     }
                 }
@@ -240,6 +247,23 @@ impl AirPodsDevice {
             aacp_manager,
             // att_manager,
             media_controller,
+            // command_tx: Some(command_tx.clone()),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AirPodsInformation {
+    pub name: String,
+    pub model_number: String,
+    pub manufacturer: String,
+    pub serial_number: String,
+    pub version1: String,
+    pub version2: String,
+    pub hardware_revision: String,
+    pub updater_identifier: String,
+    pub left_serial_number: String,
+    pub right_serial_number: String,
+    pub version3: String,
+    pub le_keys: AirPodsLEKeys
 }

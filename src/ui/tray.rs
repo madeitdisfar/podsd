@@ -5,7 +5,7 @@ use ksni::{Icon, ToolTip};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::bluetooth::aacp::ControlCommandIdentifiers;
-use crate::ui::messages::UIMessage;
+use crate::ui::messages::BluetoothUIMessage;
 
 #[derive(Debug)]
 pub(crate) struct MyTray {
@@ -20,7 +20,7 @@ pub(crate) struct MyTray {
     pub(crate) listening_mode: Option<u8>,
     pub(crate) allow_off_option: Option<u8>,
     pub(crate) command_tx: Option<UnboundedSender<(ControlCommandIdentifiers, Vec<u8>)>>,
-    pub(crate) ui_tx: Option<UnboundedSender<UIMessage>>,
+    pub(crate) ui_tx: Option<UnboundedSender<BluetoothUIMessage>>,
 }
 
 impl ksni::Tray for MyTray {
@@ -114,7 +114,7 @@ impl ksni::Tray for MyTray {
                 icon_name: "window-new".into(),
                 activate: Box::new(|this: &mut Self| {
                     if let Some(tx) = &this.ui_tx {
-                        let _ = tx.send(UIMessage::OpenWindow);
+                        let _ = tx.send(BluetoothUIMessage::OpenWindow);
                     }
                 }),
                 ..Default::default()
