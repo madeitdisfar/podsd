@@ -799,7 +799,8 @@ impl AACPManager {
 
     pub async fn send_set_feature_flags_packet(&self) -> Result<()> {
         let opcode = [opcodes::SET_FEATURE_FLAGS, 0x00];
-        let data = [0xD7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        // let data = [0xD7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let data = [0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]; // adaptive volume is actually useful, seeing if it works
         let packet = [opcode.as_slice(), data.as_slice()].concat();
         self.send_data_packet(&packet).await
     }
