@@ -341,6 +341,14 @@ impl App {
                             Some(DeviceType::Nothing) => {
                                 self.device_states.insert(mac.clone(), DeviceState::Nothing(NothingState {
                                     anc_mode: NothingAncMode::Off,
+                                    anc_mode_state: combo_box::State::new(vec![
+                                        NothingAncMode::Off,
+                                        NothingAncMode::Transparency,
+                                        NothingAncMode::AdaptiveNoiseCancellation,
+                                        NothingAncMode::LowNoiseCancellation,
+                                        NothingAncMode::MidNoiseCancellation,
+                                        NothingAncMode::HighNoiseCancellation
+                                    ]),
                                 }));
                             }
                             _ => {}
@@ -444,6 +452,9 @@ impl App {
                     }
                     BluetoothUIMessage::ATTNotification(mac, handle, value) => {
                         debug!("ATT Notification for {}: handle=0x{:04X}, value={:?}", mac, handle, value);
+
+                        // TODO: Handle Nothing's ANC Mode changes here
+
                         let ui_rx = Arc::clone(&self.ui_rx);
                         let wait_task = Task::perform(
                             wait_for_message(ui_rx),

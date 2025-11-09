@@ -103,6 +103,7 @@ impl AirPodsNoiseControlMode {
 #[derive(Clone, Debug)]
 pub struct NothingState {
     pub anc_mode: NothingAncMode,
+    pub anc_mode_state: combo_box::State<NothingAncMode>,
 }
 
 #[derive(Clone, Debug)]
