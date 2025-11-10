@@ -37,5 +37,5 @@ modules:
       - install -Dm644 flatpak/me.kavishdevar.librepods.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
     sources:
       - type: archive
-        url: https://github.com/kavishdevar/librepods/releases/download/v1.0.0/librepods-rust-1.0.0-source.tar.gz
+        url: https://github.com/kavishdevar/librepods/releases/download/linux-v1.0.0/librepods-v1.0.0-source.tar.gz
         sha256: 0a8993c06b07032ec0203127de527e9f7c042d1d093ed16435e7ec32db3fec06
