@@ -5,7 +5,7 @@ sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 
-command: librepods-rust
+command: librepods
 
 finish-args:
   - --socket=wayland
@@ -15,27 +15,30 @@ finish-args:
   - --system-talk-name=org.bluez
   - --allow=bluetooth
   - --share=network
+  - --socket=session-bus
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
-    CARGO_HOME: /run/build/librepods-rust/cargo
+    CARGO_HOME: /run/build/librepods/cargo
     CARGO_NET_OFFLINE: 'true'
     RUSTUP_HOME: /usr/lib/sdk/rust-stable
 
 modules:
-  - name: librepods-rust
+  - name: librepods
     buildsystem: simple
     build-options:
       env:
         CARGO_NET_OFFLINE: 'true'
     build-commands:
-      - cargo build --release --frozen --offline --verbose
-      - install -Dm755 target/release/librepods-rust ${FLATPAK_DEST}/bin/librepods-rust
-      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/${FLATPAK_ID}.png
+      - cargo build --frozen --offline --verbose
+      - install -Dm755 target/debug/librepods ${FLATPAK_DEST}/bin/librepods
+      - install -Dm644 assets/icon.png ${FLATPAK_DEST}/share/icons/hicolor/256x256/apps/me.kavishdevar.librepods.png
       - install -Dm644 assets/me.kavishdevar.librepods.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
       - install -Dm644 flatpak/me.kavishdevar.librepods.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
     sources:
       - type: archive
-        url: https://github.com/kavishdevar/librepods/releases/download/linux-v1.0.0/librepods-v1.0.0-source.tar.gz
-        sha256: 0a8993c06b07032ec0203127de527e9f7c042d1d093ed16435e7ec32db3fec06
+        path: ../dist/librepods-vlocal-source.tar.gz
+#        url: https://github.com/kavishdevar/librepods/releases/download/linux-v0.1.0/librepods-v0.1.0-source.tar.gz
+#        sha256: 287d31cbf6a1e1e8ab6a8ef02d4d9b31aa299652086b39c548a37b7fc8e31ba7
+
