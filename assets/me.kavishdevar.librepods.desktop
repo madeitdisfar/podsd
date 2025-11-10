@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=LibrePods
-Exec=librepods-rust
-Icon=librepods-icon
+Exec=librepods
+Icon=me.kavishdevar.librepods
 Type=Application
 Categories=Utility;
