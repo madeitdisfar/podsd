@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=LibrePods
+Exec=librepods-rust
+Icon=librepods-icon
+Type=Application
+Categories=Utility;
