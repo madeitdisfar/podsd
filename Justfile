@@ -52,7 +52,7 @@ build-appimage: build prepare bundle
     echo "Done!"
 
 
-tarball:
+tarball version:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo vendor vendor
@@ -63,9 +63,8 @@ tarball:
     [source.vendored-sources]
     directory = "vendor"
     EOF
-    VERSION="${1:-local}"
-    TAR="librepods-v${VERSION}-source.tar.gz"
+    TAR="librepods-v{{version}}-source.tar.gz"
     tar -czf "dist/${TAR}" \
-      --transform "s,^,librepods-v${VERSION}/," \
+      --transform "s,^,librepods-v{{version}}/," \
       Cargo.toml Cargo.lock src vendor .cargo assets flatpak
     echo "Created: dist/${TAR}"
