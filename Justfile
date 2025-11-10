@@ -1,4 +1,4 @@
-APP_NAME := "librepods-rust"
+APP_NAME := "librepods"
 DESKTOP_FILE := "assets/me.kavishdevar.librepods.desktop"
 ICON_FILE := "assets/icon.png"
 
@@ -19,13 +19,13 @@ prepare:
     mkdir -p "$tmpdir/usr/share/icons/hicolor/256x256/apps"
 
     cp target/release/{{APP_NAME}} "$tmpdir/usr/bin/"
-    cp assets/icon.png "$tmpdir/usr/share/icons/hicolor/256x256/apps/librepods-icon.png"
+    cp assets/icon.png "$tmpdir/usr/share/icons/hicolor/256x256/apps/me.kavishdevar.librepods.png"
     cp {{DESKTOP_FILE}} "$tmpdir/{{APP_NAME}}.desktop"
 
     printf '%s\n' \
         '#!/bin/bash' \
         'HERE="$(dirname "$(readlink -f "$0")")"' \
-        'exec "$HERE/usr/bin/librepods-rust" "$@"' \
+        'exec "$HERE/usr/bin/librepods" "$@"' \
         > "$tmpdir/AppRun"
 
     chmod +x "$tmpdir/AppRun"
@@ -40,7 +40,7 @@ bundle:
         --appdir "$tmpdir" \
         --executable "$tmpdir/usr/bin/{{APP_NAME}}" \
         --desktop-file "$tmpdir/{{APP_NAME}}.desktop" \
-        --icon-file "$tmpdir/usr/share/icons/hicolor/256x256/apps/librepods-icon.png"
+        --icon-file "$tmpdir/usr/share/icons/hicolor/256x256/apps/me.kavishdevar.librepods.png"
 
 build-appimage: build prepare bundle
     #!/usr/bin/env bash
@@ -50,3 +50,22 @@ build-appimage: build prepare bundle
     appimagetool "$tmpdir" "dist/LibrePods-x86_64.AppImage"
     rm -rf "$tmpdir" .appdir_path
     echo "Done!"
+
+
+tarball:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo vendor vendor
+    mkdir -p dist .cargo
+    cat > .cargo/config.toml <<'EOF'
+    [source.crates-io]
+    replace-with = "vendored-sources"
+    [source.vendored-sources]
+    directory = "vendor"
+    EOF
+    VERSION="${1:-local}"
+    TAR="librepods-v${VERSION}-source.tar.gz"
+    tar -czf "dist/${TAR}" \
+      --transform "s,^,librepods-v${VERSION}/," \
+      Cargo.toml Cargo.lock src vendor .cargo assets flatpak
+    echo "Created: dist/${TAR}"
