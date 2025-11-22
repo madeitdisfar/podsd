@@ -170,6 +170,10 @@ impl AirPodsDevice {
                             handle.update(|tray: &mut MyTray| {
                                 for b in &battery_info {
                                     match b.component as u8 {
+                                        0x01 => {
+                                            tray.battery_headphone = Some(b.level);
+                                            tray.battery_headphone_status = Some(b.status);
+                                        }
                                         0x02 => {
                                             tray.battery_r = Some(b.level);
                                             tray.battery_r_status = Some(b.status);

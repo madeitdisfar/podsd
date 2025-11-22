@@ -215,6 +215,7 @@ pub enum AudioSourceType {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatteryComponent {
+    Headphone = 1,
     Left = 4,
     Right = 2,
     Case = 8
@@ -476,6 +477,7 @@ impl AACPManager {
                     let base_index = 3 + i * 5;
                     batteries.push(BatteryInfo {
                         component: match payload[base_index] {
+                            0x01 => BatteryComponent::Headphone,
                             0x02 => BatteryComponent::Right,
                             0x04 => BatteryComponent::Left,
                             0x08 => BatteryComponent::Case,

@@ -4,24 +4,26 @@ use ab_glyph::{Font, ScaleFont};
 use ksni::{Icon, ToolTip};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::bluetooth::aacp::ControlCommandIdentifiers;
+use crate::bluetooth::aacp::{BatteryStatus, ControlCommandIdentifiers};
 use crate::ui::messages::BluetoothUIMessage;
 use crate::utils::get_app_settings_path;
 
 #[derive(Debug)]
-pub(crate) struct MyTray {
-    pub(crate) conversation_detect_enabled: Option<bool>,
-    pub(crate) battery_l: Option<u8>,
-    pub(crate) battery_l_status: Option<crate::bluetooth::aacp::BatteryStatus>,
-    pub(crate) battery_r: Option<u8>,
-    pub(crate) battery_r_status: Option<crate::bluetooth::aacp::BatteryStatus>,
-    pub(crate) battery_c: Option<u8>,
-    pub(crate) battery_c_status: Option<crate::bluetooth::aacp::BatteryStatus>,
-    pub(crate) connected: bool,
-    pub(crate) listening_mode: Option<u8>,
-    pub(crate) allow_off_option: Option<u8>,
-    pub(crate) command_tx: Option<UnboundedSender<(ControlCommandIdentifiers, Vec<u8>)>>,
-    pub(crate) ui_tx: Option<UnboundedSender<BluetoothUIMessage>>,
+pub struct MyTray {
+    pub conversation_detect_enabled: Option<bool>,
+    pub battery_headphone: Option<u8>,
+    pub battery_headphone_status: Option<BatteryStatus>,
+    pub battery_l: Option<u8>,
+    pub battery_l_status: Option<BatteryStatus>,
+    pub battery_r: Option<u8>,
+    pub battery_r_status: Option<BatteryStatus>,
+    pub battery_c: Option<u8>,
+    pub battery_c_status: Option<BatteryStatus>,
+    pub connected: bool,
+    pub listening_mode: Option<u8>,
+    pub allow_off_option: Option<u8>,
+    pub command_tx: Option<UnboundedSender<(ControlCommandIdentifiers, Vec<u8>)>>,
+    pub ui_tx: Option<UnboundedSender<BluetoothUIMessage>>,
 }
 
 impl ksni::Tray for MyTray {
@@ -34,21 +36,27 @@ impl ksni::Tray for MyTray {
     fn icon_pixmap(&self) -> Vec<Icon> {
         let text = {
             let mut levels: Vec<u8> = Vec::new();
-            if let Some(l) = self.battery_l {
-                if self.battery_l_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
-                    levels.push(l);
+            if let Some(h) = self.battery_headphone {
+                if self.battery_headphone_status != Some(BatteryStatus::Disconnected) {
+                    levels.push(h);
                 }
-            }
-            if let Some(r) = self.battery_r {
-                if self.battery_r_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
-                    levels.push(r);
+            } else {
+                if let Some(l) = self.battery_l {
+                    if self.battery_l_status != Some(BatteryStatus::Disconnected) {
+                        levels.push(l);
+                    }
                 }
+                if let Some(r) = self.battery_r {
+                    if self.battery_r_status != Some(BatteryStatus::Disconnected) {
+                        levels.push(r);
+                    }
+                }
+                // if let Some(c) = self.battery_c {
+                //     if self.battery_c_status != Some(BatteryStatus::Disconnected) {
+                //         levels.push(c);
+                //     }
+                // }
             }
-            // if let Some(c) = self.battery_c {
-            //     if self.battery_c_status != Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) {
-            //         levels.push(c);
-            //     }
-            // }
             let min_battery = levels.iter().min().copied();
             if let Some(b) = min_battery {
                 format!("{}", b)
@@ -56,8 +64,8 @@ impl ksni::Tray for MyTray {
                 "?".to_string()
             }
         };
-        let any_bud_charging = matches!(self.battery_l_status, Some(crate::bluetooth::aacp::BatteryStatus::Charging))
-            || matches!(self.battery_r_status, Some(crate::bluetooth::aacp::BatteryStatus::Charging));
+        let any_bud_charging = matches!(self.battery_l_status, Some(BatteryStatus::Charging))
+            || matches!(self.battery_r_status, Some(BatteryStatus::Charging));
         let app_settings_path = get_app_settings_path();
         let settings = std::fs::read_to_string(&app_settings_path)
             .ok()
@@ -70,12 +78,12 @@ impl ksni::Tray for MyTray {
         vec![icon]
     }
     fn tool_tip(&self) -> ToolTip {
-        let format_component = |label: &str, level: Option<u8>, status: Option<crate::bluetooth::aacp::BatteryStatus>| -> String {
+        let format_component = |label: &str, level: Option<u8>, status: Option<BatteryStatus>| -> String {
             match status {
-                Some(crate::bluetooth::aacp::BatteryStatus::Disconnected) => format!("{}: -", label),
+                Some(BatteryStatus::Disconnected) => format!("{}: -", label),
                 _ => {
                     let pct = level.map(|b| format!("{}%", b)).unwrap_or("?".to_string());
-                    let suffix = if status == Some(crate::bluetooth::aacp::BatteryStatus::Charging) {
+                    let suffix = if status == Some(BatteryStatus::Charging) {
                         "⚡"
                     } else {
                         ""

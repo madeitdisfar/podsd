@@ -102,6 +102,8 @@ async fn async_main(
     } else {
         let tray = MyTray {
             conversation_detect_enabled: None,
+            battery_headphone: None,
+            battery_headphone_status: None,
             battery_l: None,
             battery_l_status: None,
             battery_r: None,

@@ -610,22 +610,34 @@ impl App {
                                     match self.device_states.get(mac) {
                                         Some(DeviceState::AirPods(state)) => {
                                             let b = &state.battery;
-                                            let left  = b.iter().find(|x| x.component == BatteryComponent::Left)
-                                                .map(|x| x.level).unwrap_or_default();
-                                            let right = b.iter().find(|x| x.component == BatteryComponent::Right)
-                                                .map(|x| x.level).unwrap_or_default();
-                                            let case  = b.iter().find(|x| x.component == BatteryComponent::Case)
-                                                .map(|x| x.level).unwrap_or_default();
-                                            let left_charging = b.iter().find(|x| x.component == BatteryComponent::Left)
-                                                .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
-                                            let right_charging = b.iter().find(|x| x.component == BatteryComponent::Right)
-                                                .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
-                                            let case_charging = b.iter().find(|x| x.component == BatteryComponent::Case)
-                                                .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
-                                            format!(
-                                                "\u{1018E5} {}%{} \u{1018E8} {}%{} \u{100E6C} {}%{}",
-                                                left, if left_charging {"\u{1002E6}"} else {""}, right, if right_charging {"\u{1002E6}"} else {""}, case, if case_charging {"\u{1002E6}"} else {""}
-                                            )
+                                            let headphone = b.iter().find(|x| x.component == BatteryComponent::Headphone)
+                                                .map(|x| x.level);
+                                            // if headphones is not None, use only that
+                                            if let Some(level) = headphone {
+                                                let charging = b.iter().find(|x| x.component == BatteryComponent::Headphone)
+                                                    .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
+                                                format!(
+                                                    "􀺹 {}%{}",
+                                                    level, if charging {"\u{1002E6}"} else {""}
+                                                )
+                                            } else {
+                                                let left  = b.iter().find(|x| x.component == BatteryComponent::Left)
+                                                    .map(|x| x.level).unwrap_or_default();
+                                                let right = b.iter().find(|x| x.component == BatteryComponent::Right)
+                                                    .map(|x| x.level).unwrap_or_default();
+                                                let case  = b.iter().find(|x| x.component == BatteryComponent::Case)
+                                                    .map(|x| x.level).unwrap_or_default();
+                                                let left_charging = b.iter().find(|x| x.component == BatteryComponent::Left)
+                                                    .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
+                                                let right_charging = b.iter().find(|x| x.component == BatteryComponent::Right)
+                                                    .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
+                                                let case_charging = b.iter().find(|x| x.component == BatteryComponent::Case)
+                                                    .map(|x| x.status == BatteryStatus::Charging).unwrap_or(false);
+                                                format!(
+                                                    "\u{1018E5} {}%{} \u{1018E8} {}%{} \u{100E6C} {}%{}",
+                                                    left, if left_charging {"\u{1002E6}"} else {""}, right, if right_charging {"\u{1002E6}"} else {""}, case, if case_charging {"\u{1002E6}"} else {""}
+                                                )
+                                            }
                                         }
                                         _ => "Connected".to_string(),
                                     }
