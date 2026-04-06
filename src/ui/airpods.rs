@@ -5,7 +5,7 @@ use iced::overlay::menu;
 use iced::widget::button::Style;
 use iced::widget::rule::FillMode;
 use iced::widget::{
-    Rule, Space, button, column, combo_box, container, row, rule, text, text_input, toggler,
+    Space, button, column, combo_box, container, row, rule, text, text_input, toggler,
 };
 use iced::{Background, Border, Center, Color, Length, Padding, Theme};
 use log::error;
@@ -30,13 +30,13 @@ pub fn airpods_view<'a>(
     let aacp_manager_for_rename = aacp_manager.clone();
     let rename_input = container(
         row![
-            Space::with_width(10),
+            Space::new().width(10),
             text("Name").size(16).style(|theme: &Theme| {
                 let mut style = text::Style::default();
                 style.color = Some(theme.palette().text);
                 style
             }),
-            Space::with_width(Length::Fill),
+            Space::new().width(Length::Fill),
             text_input("", &state.device_name)
                 .padding(Padding {
                     top: 5.0,
@@ -99,7 +99,7 @@ pub fn airpods_view<'a>(
                 style.color = Some(theme.palette().text);
                 style
             }),
-            Space::with_width(Length::Fill),
+            Space::new().width(Length::Fill),
             {
                 let state_clone = state.clone();
                 let mac = mac.clone();
@@ -159,6 +159,7 @@ pub fn airpods_view<'a>(
                     selected_background: Background::Color(
                         theme.palette().primary.scale_alpha(0.3),
                     ),
+                    shadow: Default::default()
                 })
             }
         ]
@@ -242,13 +243,13 @@ pub fn airpods_view<'a>(
                     .align_y(Center)
                     .spacing(8)
                 },
-                Rule::horizontal(8).style(
+                rule::horizontal(1).style(
                     |theme: &Theme| {
                         rule::Style {
-                            color: theme.palette().text,
-                            width: 1,
+                            color: theme.palette().text.scale_alpha(0.2),
                             radius: Radius::from(12),
-                            fill_mode: FillMode::Full
+                            fill_mode: FillMode::Full,
+                            snap: false
                         }
                     }
                 ),
@@ -371,7 +372,7 @@ pub fn airpods_view<'a>(
                         style.color = Some(theme.palette().text);
                         style
                     }),
-                    Space::with_width(Length::Fill),
+                    Space::new().width(Length::Fill),
                     text(airpods_info.model_number.clone()).size(16)
                 ],
                 row![
@@ -380,7 +381,7 @@ pub fn airpods_view<'a>(
                         style.color = Some(theme.palette().text);
                         style
                     }),
-                    Space::with_width(Length::Fill),
+                    Space::new().width(Length::Fill),
                     text(airpods_info.manufacturer.clone()).size(16)
                 ],
                 row![
@@ -389,7 +390,7 @@ pub fn airpods_view<'a>(
                         style.color = Some(theme.palette().text);
                         style
                     }),
-                    Space::with_width(Length::Fill),
+                    Space::new().width(Length::Fill),
                     button(text(airpods_info.serial_number.clone()).size(16))
                         .style(|theme: &Theme, _status| {
                             let mut style = Style::default();
@@ -406,7 +407,7 @@ pub fn airpods_view<'a>(
                         style.color = Some(theme.palette().text);
                         style
                     }),
-                    Space::with_width(Length::Fill),
+                    Space::new().width(Length::Fill),
                     button(text(airpods_info.left_serial_number.clone()).size(16))
                         .style(|theme: &Theme, _status| {
                             let mut style = Style::default();
@@ -425,7 +426,7 @@ pub fn airpods_view<'a>(
                         style.color = Some(theme.palette().text);
                         style
                     }),
-                    Space::with_width(Length::Fill),
+                    Space::new().width(Length::Fill),
                     button(text(airpods_info.right_serial_number.clone()).size(16))
                         .style(|theme: &Theme, _status| {
                             let mut style = Style::default();
@@ -444,7 +445,7 @@ pub fn airpods_view<'a>(
                         style.color = Some(theme.palette().text);
                         style
                     }),
-                    Space::with_width(Length::Fill),
+                    Space::new().width(Length::Fill),
                     text(airpods_info.version1.clone()).size(16)
                 ],
                 row![
@@ -453,7 +454,7 @@ pub fn airpods_view<'a>(
                         style.color = Some(theme.palette().text);
                         style
                     }),
-                    Space::with_width(Length::Fill),
+                    Space::new().width(Length::Fill),
                     text(airpods_info.version2.clone()).size(16)
                 ],
                 row![
@@ -462,7 +463,7 @@ pub fn airpods_view<'a>(
                         style.color = Some(theme.palette().text);
                         style
                     }),
-                    Space::with_width(Length::Fill),
+                    Space::new().width(Length::Fill),
                     text(airpods_info.version3.clone()).size(16)
                 ]
             ]
@@ -508,13 +509,13 @@ pub fn airpods_view<'a>(
 
     container(column![
         rename_input,
-        Space::with_height(Length::from(20)),
+        Space::new().height(Length::from(20)),
         listening_mode,
-        Space::with_height(Length::from(20)),
+        Space::new().height(Length::from(20)),
         audio_settings_col,
-        Space::with_height(Length::from(20)),
+        Space::new().height(Length::from(20)),
         off_listening_mode_toggle,
-        Space::with_height(Length::from(20)),
+        Space::new().height(Length::from(20)),
         information_col
     ])
     .padding(20)

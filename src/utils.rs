@@ -1,6 +1,6 @@
 use aes::Aes128;
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::Array;
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use iced::Theme;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -34,8 +34,8 @@ fn e(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
     swapped_key.reverse();
     let mut swapped_data = *data;
     swapped_data.reverse();
-    let cipher = Aes128::new(&GenericArray::from(swapped_key));
-    let mut block = GenericArray::from(swapped_data);
+    let cipher = Aes128::new(&Array::from(swapped_key));
+    let mut block = Array::from(swapped_data);
     cipher.encrypt_block(&mut block);
     let mut result: [u8; 16] = block.into();
     result.reverse();

@@ -22,7 +22,7 @@ use ksni::TrayMethods;
 use log::{info, warn};
 use std::collections::HashMap;
 use std::env;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::unbounded_channel;
@@ -64,18 +64,18 @@ fn main() -> iced::Result {
     }
 
     let log_level = if args.debug { "debug" } else { "info" };
-    let wayland_display = env::var("WAYLAND_DISPLAY").is_ok();
-    if wayland_display && env::var("WGPU_BACKEND").is_err() {
-        unsafe { env::set_var("WGPU_BACKEND", "gl") };
-    }
+    // let wayland_display = env::var("WAYLAND_DISPLAY").is_ok();
+    // if wayland_display && env::var("WGPU_BACKEND").is_err() {
+    //     unsafe { env::set_var("WGPU_BACKEND", "gl") };
+    // }
     if env::var("RUST_LOG").is_err() {
         unsafe {
             env::set_var(
                 "RUST_LOG",
                 log_level.to_owned()
                     + &format!(
-                        ",winit=warn,tracing=warn,iced_wgpu=warn,wgpu_hal=warn,wgpu_core=warn,cosmic_text=warn,naga=warn,iced_winit=warn,librepods_rust::bluetooth::le={}",
-                        if args.le_debug { "debug" } else { "warn" }
+                        ",zbus=warn,winit=warn,tracing=warn,iced_wgpu=warn,wgpu_hal=warn,wgpu_core=warn,cosmic_text=warn,naga=warn,iced_winit=warn,librepods::bluetooth::le={}",
+                        if args.le_debug { "debug" } else { "info" }
                     ),
             )
         };

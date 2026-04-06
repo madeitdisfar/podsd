@@ -29,14 +29,14 @@ pub fn nothing_view<'a>(
                 style.color = Some(theme.palette().primary);
                 style
             }))
-            .push(Space::with_height(iced::Length::from(10)))
+            .push(Space::new().height(iced::Length::from(10)))
             .push(iced::widget::row![
                 text("Serial Number").size(16).style(|theme: &Theme| {
                     let mut style = text::Style::default();
                     style.color = Some(theme.palette().text);
                     style
                 }),
-                Space::with_width(Length::Fill),
+                Space::new().width(Length::Fill),
                 text(nothing_info.serial_number.clone()).size(16)
             ])
             .push(iced::widget::row![
@@ -45,7 +45,7 @@ pub fn nothing_view<'a>(
                     style.color = Some(theme.palette().text);
                     style
                 }),
-                Space::with_width(Length::Fill),
+                Space::new().width(Length::Fill),
                 text(nothing_info.firmware_version.clone()).size(16)
             ]);
     }
@@ -57,7 +57,7 @@ pub fn nothing_view<'a>(
                 style.color = Some(theme.palette().text);
                 style
             }),
-            Space::with_width(Length::Fill),
+            Space::new().width(Length::Fill),
             {
                 let state_clone = state.clone();
                 let mac = mac.clone();
@@ -137,6 +137,7 @@ pub fn nothing_view<'a>(
                     selected_background: Background::Color(
                         theme.palette().primary.scale_alpha(0.3),
                     ),
+                    shadow: Default::default()
                 })
             }
         ]
@@ -159,7 +160,7 @@ pub fn nothing_view<'a>(
 
     container(column![
         noise_control_mode,
-        Space::with_height(Length::from(20)),
+        Space::new().height(Length::from(20)),
         container(information_col)
             .style(|theme: &Theme| {
                 let mut style = container::Style::default();

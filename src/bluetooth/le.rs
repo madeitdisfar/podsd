@@ -3,8 +3,8 @@ use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
 use crate::ui::tray::MyTray;
 use crate::utils::{ah, get_devices_path, get_preferences_path};
 use aes::Aes128;
-use aes::cipher::generic_array::GenericArray;
-use aes::cipher::{BlockDecrypt, KeyInit};
+use aes::cipher::Array;
+use aes::cipher::{BlockCipherDecrypt, KeyInit};
 use bluer::monitor::{Monitor, MonitorEvent, Pattern};
 use bluer::{Address, Session};
 use futures::StreamExt;
@@ -17,8 +17,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 fn decrypt(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
-    let cipher = Aes128::new(&GenericArray::from(*key));
-    let mut block = GenericArray::from(*data);
+    let cipher = Aes128::new(&Array::from(*key));
+    let mut block = Array::from(*data);
     cipher.decrypt_block(&mut block);
     block.into()
 }

@@ -55,14 +55,14 @@ impl AirPodsDevice {
             error!("Failed to send handshake to AirPods device: {}", e);
         }
 
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(300)).await;
 
         info!("Setting feature flags");
         if let Err(e) = aacp_manager.send_set_feature_flags_packet().await {
             error!("Failed to set feature flags: {}", e);
         }
 
-        sleep(Duration::from_millis(100)).await;
+        sleep(Duration::from_millis(300)).await;
 
         info!("Requesting notifications");
         if let Err(e) = aacp_manager.send_notification_request().await {

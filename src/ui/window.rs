@@ -17,12 +17,9 @@ use iced::widget::button::Style;
 use iced::widget::rule::FillMode;
 use iced::widget::{
     Space, button, column, combo_box, container, pane_grid, row, rule, scrollable, text,
-    text_input, toggler, vertical_rule,
+    text_input, toggler
 };
-use iced::{
-    Background, Border, Center, Element, Font, Length, Padding, Size, Subscription, Task, Theme,
-    daemon, window,
-};
+use iced::{Background, Border, Center, Element, Font, Length, Padding, Size, Subscription, Task, Theme, daemon, window, Settings};
 use log::{debug, error};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,12 +33,30 @@ pub fn start_ui(
     device_managers: Arc<RwLock<HashMap<String, DeviceManagers>>>,
     stem_control: Arc<AtomicBool>,
 ) -> iced::Result {
-    daemon(App::title, App::update, App::view)
-        .subscription(App::subscription)
-        .theme(App::theme)
-        .font(include_bytes!("../../assets/font/sf_pro.otf").as_slice())
-        .default_font(Font::with_name("SF Pro Text"))
-        .run_with(move || App::new(ui_rx, start_minimized, device_managers, stem_control))
+    let ui_rx = Arc::new(Mutex::new(ui_rx));
+
+    // not sure if this is a good idea
+    daemon(
+        move || {
+            App::new(
+                Arc::clone(&ui_rx),
+                start_minimized,
+                Arc::clone(&device_managers),
+                Arc::clone(&stem_control),
+            )
+        },
+        App::update,
+        App::view,
+    )
+    .subscription(App::subscription)
+    .theme(App::theme)
+    .settings(Settings {
+        id: Some("librepods".to_string()),
+        fonts: vec![include_bytes!("../../assets/font/sf_pro.otf").as_slice().into()],
+        default_font: Font::with_name("SF Pro Text"),
+        ..Settings::default()
+    })
+    .run()
 }
 
 pub struct App {
@@ -109,7 +124,7 @@ pub enum Pane {
 
 impl App {
     pub fn new(
-        ui_rx: UnboundedReceiver<BluetoothUIMessage>,
+        ui_rx: Arc<Mutex<UnboundedReceiver<BluetoothUIMessage>>>,
         start_minimized: bool,
         device_managers: Arc<RwLock<HashMap<String, DeviceManagers>>>,
         stem_control: Arc<AtomicBool>,
@@ -118,7 +133,6 @@ impl App {
         let split = panes.split(pane_grid::Axis::Vertical, first_pane, Pane::Content);
         panes.resize(split.unwrap().1, 0.2);
 
-        let ui_rx = Arc::new(Mutex::new(ui_rx));
 
         let wait_task = Task::perform(wait_for_message(Arc::clone(&ui_rx)), |msg| msg);
 
@@ -773,46 +787,47 @@ impl App {
                     let content = column![
                         row![
                             text("Devices").size(18),
-                            Space::with_width(Length::Fill),
-                            button(
-                                container(text("+").size(18)).center_x(Length::Fill).center_y(Length::Fill)
-                            )
-                                .style(
-                                    |theme: &Theme, _status| {
-                                        let mut style = Style::default();
-                                        style.text_color = theme.palette().text;
-                                        style.background = Some(Background::Color(theme.palette().primary.scale_alpha(0.1)));
-                                        style.border = Border {
-                                            width: 1.0,
-                                            color: theme.palette().primary.scale_alpha(0.1),
-                                            radius: Radius::from(8.0),
-                                        };
-                                        style
-                                    }
-                                )
-                                .padding(0)
-                                .width(Length::from(28))
-                                .height(Length::from(28))
-                                .on_press(Message::ShowNewDialogTab)
+                            // Removing until I actually add support for devices other than AirPods
+                            // Space::new().width(Length::Fill),
+                            // button(
+                            //     container(text("+").size(18)).center_x(Length::Fill).center_y(Length::Fill)
+                            // )
+                            //     .style(
+                            //         |theme: &Theme, _status| {
+                            //             let mut style = Style::default();
+                            //             style.text_color = theme.palette().text;
+                            //             style.background = Some(Background::Color(theme.palette().primary.scale_alpha(0.1)));
+                            //             style.border = Border {
+                            //                 width: 1.0,
+                            //                 color: theme.palette().primary.scale_alpha(0.1),
+                            //                 radius: Radius::from(8.0),
+                            //             };
+                            //             style
+                            //         }
+                            //     )
+                            //     .padding(0)
+                            //     .width(Length::from(28))
+                            //     .height(Length::from(28))
+                            //     .on_press(Message::ShowNewDialogTab)
                         ]
                         .align_y(Center)
                         .padding(4),
-                        Space::with_height(Length::from(8)),
+                        Space::new().height(Length::from(8)),
                         devices,
-                        Space::with_height(Length::Fill),
+                        Space::new().height(Length::Fill),
                         settings
                     ]
                         .padding(12);
                     pane_grid::Content::new(
                         row![
                             content,
-                            vertical_rule(1).style(
+                            rule::vertical(1).style(
                                 |theme: &Theme| {
                                     rule::Style{
                                         color: theme.palette().primary.scale_alpha(0.2),
-                                        width: 2,
                                         radius: Radius::from(8.0),
-                                        fill_mode: FillMode::Full
+                                        fill_mode: FillMode::Full,
+                                        snap: false
                                     }
                                 }
                             )
@@ -957,7 +972,7 @@ impl App {
                                     row![
                                         text("Theme")
                                             .size(16),
-                                        Space::with_width(Length::Fill),
+                                        Space::new().width(Length::Fill),
                                         combo_box(
                                             &self.theme_state,
                                             "Select theme",
@@ -992,6 +1007,7 @@ impl App {
                                                     text_color: theme.palette().text,
                                                     selected_text_color: theme.palette().text,
                                                     selected_background: Background::Color(theme.palette().primary.scale_alpha(0.3)),
+                                                    shadow: Default::default()
                                                 }
                                             }
                                         )
@@ -1088,9 +1104,9 @@ impl App {
                             container(
                                 column![
                                     appearance_settings_col,
-                                    Space::with_height(Length::from(20)),
+                                    Space::new().height(Length::from(20)),
                                     tray_text_mode_toggle,
-                                    Space::with_height(Length::from(20)),
+                                    Space::new().height(Length::from(20)),
                                     controls_settings_col,
                                 ]
                             )
@@ -1102,7 +1118,7 @@ impl App {
                             container(
                                 column![
                                     text("Pick a paired device to add:").size(18),
-                                    Space::with_height(Length::from(10)),
+                                    Space::new().height(Length::from(10)),
                                     {
                                         let mut list_col = column![].spacing(12);
                                         for device in self.paired_devices.clone() {
@@ -1113,7 +1129,7 @@ impl App {
                                                         text(device.0.to_string()).size(16),
                                                         text(device.1.to_string()).size(12)
                                                     ].into(),
-                                                    Space::with_width(Length::Fill).into(),
+                                                    Space::new().height(Length::Fill).into(),
                                                 ];
                                                 if !matches!(&self.pending_add_device, Some((_, addr)) if addr == &device.1) {
                                                     row_elements.push(
@@ -1145,7 +1161,7 @@ impl App {
                                                         item_col = item_col.push(
                                                             row![
                                                                 text("Device Type:").size(16),
-                                                                Space::with_width(Length::Fill),
+                                                                Space::new().width(Length::Fill),
                                                                 combo_box(
                                                                     &self.device_type_state,
                                                                     "Select device type",
@@ -1180,6 +1196,7 @@ impl App {
                                                                                 text_color: theme.palette().text,
                                                                                 selected_text_color: theme.palette().text,
                                                                                 selected_background: Background::Color(theme.palette().primary.scale_alpha(0.3)),
+                                                                                shadow: Default::default()
                                                                             }
                                                                         }
                                                                     )
@@ -1188,7 +1205,7 @@ impl App {
                                                         );
                                                         item_col = item_col.push(
                                                             row![
-                                                                Space::with_width(Length::Fill),
+                                                                Space::new().width(Length::Fill),
                                                                 button(text("Cancel").size(16).width(Length::Fill).center())
                                                                     .on_press(Message::CancelAddDevice)
                                                                     .style(|theme: &Theme, _status| {
@@ -1200,7 +1217,7 @@ impl App {
                                                                     })
                                                                     .width(Length::from(120))
                                                                     .padding(4),
-                                                                Space::with_width(Length::from(20)),
+                                                                Space::new().width(Length::from(20)),
                                                                 button(text("Add Device").size(16).width(Length::Fill).center())
                                                                     .on_press(Message::ConfirmAddDevice)
                                                                     .style(|theme: &Theme, _status| {
