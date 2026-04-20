@@ -10,7 +10,7 @@ use crate::ui::airpods::airpods_view;
 use crate::ui::messages::BluetoothUIMessage;
 use crate::ui::nothing::nothing_view;
 use crate::utils::{MyTheme, get_app_settings_path, get_devices_path};
-use bluer::{Address, Session};
+use bluer::{Address};
 use iced::border::Radius;
 use iced::overlay::menu;
 use iced::widget::button::Style;
@@ -19,7 +19,7 @@ use iced::widget::{
     Space, button, column, combo_box, container, pane_grid, row, rule, scrollable, text,
     text_input, toggler
 };
-use iced::{Background, Border, Center, Element, Font, Length, Padding, Size, Subscription, Task, Theme, daemon, window, Settings};
+use iced::{Background, Border, Center, Element, Font, Length, Padding, Size, Subscription, Task, Theme, daemon, window, Settings, Program};
 use log::{debug, error};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,7 +31,7 @@ pub fn start_ui(
     ui_rx: UnboundedReceiver<BluetoothUIMessage>,
     start_minimized: bool,
     device_managers: Arc<RwLock<HashMap<String, DeviceManagers>>>,
-    stem_control: Arc<AtomicBool>,
+    // stem_control: Arc<AtomicBool>,
 ) -> iced::Result {
     let ui_rx = Arc::new(Mutex::new(ui_rx));
 
@@ -42,7 +42,7 @@ pub fn start_ui(
                 Arc::clone(&ui_rx),
                 start_minimized,
                 Arc::clone(&device_managers),
-                Arc::clone(&stem_control),
+                // Arc::clone(&stem_control),
             )
         },
         App::update,
@@ -50,6 +50,7 @@ pub fn start_ui(
     )
     .subscription(App::subscription)
     .theme(App::theme)
+    .title(App::title)
     .settings(Settings {
         id: Some("librepods".to_string()),
         fonts: vec![include_bytes!("../../assets/font/sf_pro.otf").as_slice().into()],
@@ -74,7 +75,7 @@ pub struct App {
     device_type_state: combo_box::State<DeviceType>,
     selected_device_type: Option<DeviceType>,
     tray_text_mode: bool,
-    stem_control: Arc<AtomicBool>,
+    stem_control: bool,
 }
 
 pub struct BluetoothState {
@@ -98,7 +99,7 @@ pub enum Message {
     ThemeSelected(MyTheme),
     CopyToClipboard(String),
     BluetoothMessage(BluetoothUIMessage),
-    ShowNewDialogTab,
+    // ShowNewDialogTab,
     GotPairedDevices(HashMap<String, Address>),
     StartAddDevice(String, Address),
     SelectDeviceType(DeviceType),
@@ -127,7 +128,7 @@ impl App {
         ui_rx: Arc<Mutex<UnboundedReceiver<BluetoothUIMessage>>>,
         start_minimized: bool,
         device_managers: Arc<RwLock<HashMap<String, DeviceManagers>>>,
-        stem_control: Arc<AtomicBool>,
+        // stem_control: Arc<AtomicBool>,
     ) -> (Self, Task<Message>) {
         let (mut panes, first_pane) = pane_grid::State::new(Pane::Sidebar);
         let split = panes.split(pane_grid::Axis::Vertical, first_pane, Pane::Content);
@@ -159,6 +160,11 @@ impl App {
             .clone()
             .and_then(|v| v.get("tray_text_mode").cloned())
             .and_then(|ttm| serde_json::from_value(ttm).ok())
+            .unwrap_or(false);
+        let stem_control = settings
+            .clone()
+            .and_then(|v| v.get("stem_control").cloned())
+            .and_then(|s| serde_json::from_value(s).ok())
             .unwrap_or(false);
 
         let bluetooth_state = BluetoothState::new();
@@ -246,7 +252,7 @@ impl App {
                 let settings = serde_json::json!({
                     "theme": self.selected_theme,
                     "tray_text_mode": self.tray_text_mode,
-                    "stem_control": self.stem_control.load(Ordering::Relaxed),
+                    "stem_control": self.stem_control,
                 });
                 debug!(
                     "Writing settings to {}: {}",
@@ -404,7 +410,16 @@ impl App {
                         let wait_task = Task::perform(wait_for_message(ui_rx), |msg| msg);
                         debug!("Device disconnected: {}", mac);
 
+                        self.bluetooth_state
+                            .connected_devices
+                            .retain(|device| device != &mac);
+
                         self.device_states.remove(&mac);
+
+                        if matches!(&self.selected_tab, Tab::Device(selected_mac) if selected_mac == &mac) {
+                            self.selected_tab = Tab::Device("none".to_string());
+                        }
+
                         Task::batch(vec![wait_task])
                     }
                     BluetoothUIMessage::AACPUIEvent(mac, event) => {
@@ -520,11 +535,11 @@ impl App {
                     }
                 }
             }
-            Message::ShowNewDialogTab => {
-                debug!("switching to Add Device tab");
-                self.selected_tab = Tab::AddDevice;
-                Task::perform(load_paired_devices(), Message::GotPairedDevices)
-            }
+            // Message::ShowNewDialogTab => {
+            //     debug!("switching to Add Device tab");
+            //     self.selected_tab = Tab::AddDevice;
+            //     Task::perform(load_paired_devices(), Message::GotPairedDevices)
+            // }
             Message::GotPairedDevices(map) => {
                 self.paired_devices = map;
                 Task::none()
@@ -615,7 +630,7 @@ impl App {
                 let settings = serde_json::json!({
                     "theme": self.selected_theme,
                     "tray_text_mode": self.tray_text_mode,
-                    "stem_control": self.stem_control.load(Ordering::Relaxed),
+                    "stem_control": self.stem_control,
                 });
                 debug!(
                     "Writing settings to {}: {}",
@@ -626,12 +641,12 @@ impl App {
                 Task::none()
             }
             Message::StemControlChanged(is_enabled) => {
-                self.stem_control.store(is_enabled, Ordering::Relaxed);
+                self.stem_control = is_enabled;
                 let app_settings_path = get_app_settings_path();
                 let settings = serde_json::json!({
                     "theme": self.selected_theme,
                     "tray_text_mode": self.tray_text_mode,
-                    "stem_control": self.stem_control.load(Ordering::Relaxed),
+                    "stem_control": self.stem_control,
                 });
                 debug!(
                     "Writing settings to {}: {}",
@@ -1040,7 +1055,7 @@ impl App {
                                 ]
                                 .spacing(12);
 
-                            let stem_control_value = self.stem_control.load(Ordering::Relaxed);
+                            let stem_control_value = self.stem_control;
                             let stem_control_toggle = container(
                                 row![
                                     column![
@@ -1300,25 +1315,26 @@ async fn wait_for_message(ui_rx: Arc<Mutex<UnboundedReceiver<BluetoothUIMessage>
         }
     }
 }
-async fn load_paired_devices() -> HashMap<String, Address> {
-    let mut devices = HashMap::new();
 
-    let session = Session::new().await.ok().unwrap();
-    let adapter = session.default_adapter().await.ok().unwrap();
-    let addresses = adapter.device_addresses().await.ok().unwrap();
-    for addr in addresses {
-        let device = adapter.device(addr).ok().unwrap();
-        let paired = device.is_paired().await.ok().unwrap();
-        if paired {
-            let name = device
-                .name()
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| "Unknown".to_string());
-            devices.insert(name, addr);
-        }
-    }
-
-    devices
-}
+// async fn load_paired_devices() -> HashMap<String, Address> {
+//     let mut devices = HashMap::new();
+//
+//     let session = Session::new().await.ok().unwrap();
+//     let adapter = session.default_adapter().await.ok().unwrap();
+//     let addresses = adapter.device_addresses().await.ok().unwrap();
+//     for addr in addresses {
+//         let device = adapter.device(addr).ok().unwrap();
+//         let paired = device.is_paired().await.ok().unwrap();
+//         if paired {
+//             let name = device
+//                 .name()
+//                 .await
+//                 .ok()
+//                 .flatten()
+//                 .unwrap_or_else(|| "Unknown".to_string());
+//             devices.insert(name, addr);
+//         }
+//     }
+//
+//     devices
+// }

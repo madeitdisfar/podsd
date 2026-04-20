@@ -28,7 +28,7 @@ pub mod opcodes {
     pub const EAR_DETECTION: u8 = 0x06;
     pub const CONVERSATION_AWARENESS: u8 = 0x4B;
     pub const INFORMATION: u8 = 0x1D;
-    pub const RENAME: u8 = 0x1E;
+    pub const RENAME: u8 = 0x1A;
     pub const PROXIMITY_KEYS_REQ: u8 = 0x30;
     pub const PROXIMITY_KEYS_RSP: u8 = 0x31;
     pub const STEM_PRESS: u8 = 0x19;
@@ -959,9 +959,10 @@ impl AACPManager {
     pub async fn send_rename_packet(&self, name: &str) -> Result<()> {
         let name_bytes = name.as_bytes();
         let size = name_bytes.len();
-        let mut packet = Vec::with_capacity(5 + size);
+        let mut packet = Vec::with_capacity(6 + size);
         packet.push(opcodes::RENAME);
         packet.push(0x00);
+        packet.push(0x01);
         packet.push(size as u8);
         packet.push(0x00);
         packet.extend_from_slice(name_bytes);
@@ -1215,8 +1216,8 @@ async fn recv_thread(manager: AACPManager, sp: Arc<SeqPacket>) {
                 manager.receive_packet(data).await;
             }
             Err(e) => {
-                error!("Read error: {}", e);
-                debug!(
+                debug!("Read error: {}", e);
+                info!(
                     "We have probably disconnected, clearing state variables (owns=false, connected_devices=empty, control_command_status_list=empty)."
                 );
                 let mut state = manager.state.lock().await;

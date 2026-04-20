@@ -8,9 +8,9 @@ use ksni::Handle;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
+use crate::utils::get_app_settings_path;
 
 pub struct AirPodsDevice {
     pub mac_address: Address,
@@ -25,7 +25,6 @@ impl AirPodsDevice {
         mac_address: Address,
         tray_handle: Option<Handle<MyTray>>,
         ui_tx: tokio::sync::mpsc::UnboundedSender<BluetoothUIMessage>,
-        stem_control: Arc<AtomicBool>,
     ) -> Self {
         info!("Creating new AirPodsDevice for {}", mac_address);
         let mut aacp_manager = AACPManager::new();
@@ -82,7 +81,17 @@ impl AirPodsDevice {
             error!("Failed to request proximity keys: {}", e);
         }
 
-        if stem_control.load(Ordering::Relaxed) {
+        let app_settings_path = get_app_settings_path();
+        let settings = std::fs::read_to_string(&app_settings_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let stem_control = settings
+            .clone()
+            .and_then(|v| v.get("stem_control").cloned())
+            .and_then(|s| serde_json::from_value(s).ok())
+            .unwrap_or(false);
+
+        if stem_control {
             // Enable stem press detection (double and triple tap)
             // StemConfig bitmask for the control command: single=0x01, double=0x02, triple=0x04, long=0x08
             // We want double and triple: 0x02 | 0x04 = 0x06
@@ -222,7 +231,6 @@ impl AirPodsDevice {
         let local_mac_events = local_mac.clone();
         let ui_tx_clone = ui_tx.clone();
         let command_tx_clone = command_tx.clone();
-        let stem_control_clone = stem_control.clone();
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 let event_clone = event.clone();
@@ -348,7 +356,7 @@ impl AirPodsDevice {
                             "Received Stem Press: {:?} on {:?}",
                             press_type, bud_type
                         );
-                        if stem_control_clone.load(Ordering::Relaxed) {
+                        if stem_control {
                             let controller = mc_clone.lock().await;
                             match press_type {
                                 StemPressType::DoublePress => {
