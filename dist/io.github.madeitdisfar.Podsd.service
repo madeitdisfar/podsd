@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.madeitdisfar.Podsd
+Exec=/bin/false
+SystemdService=podsd.service

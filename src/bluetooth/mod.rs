@@ -1,5 +1,5 @@
+#[allow(dead_code)]
 pub mod aacp;
+#[allow(dead_code)]
 pub mod att;
-pub(crate) mod discovery;
 pub mod le;
-pub mod managers;

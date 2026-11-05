@@ -1,7 +1,7 @@
-use crate::bluetooth::aacp::BatteryStatus;
 use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
-use crate::ui::tray::MyTray;
-use crate::utils::{ah, get_devices_path, get_preferences_path};
+use crate::hub::Hub;
+use crate::state::Battery;
+use crate::utils::{ah, load_devices};
 use aes::Aes128;
 use aes::cipher::Array;
 use aes::cipher::{BlockCipherDecrypt, KeyInit};
@@ -10,7 +10,6 @@ use bluer::{Address, Session};
 use futures::StreamExt;
 use hex;
 use log::{debug, info};
-use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -46,15 +45,15 @@ fn verify_rpa(addr: &str, irk: &[u8; 16]) -> bool {
     hash == computed_hash
 }
 
-pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> bluer::Result<()> {
+/// Watches Apple BLE adverts for known AirPods: battery while they're connected
+/// elsewhere, and auto-connect when they say they're free. Needs BlueZ's
+/// AdvertisementMonitor (bluetoothd started with -E / --experimental).
+pub async fn start_le_monitor(hub: Hub) -> bluer::Result<()> {
     let session = Session::new().await?;
     let adapter = session.default_adapter().await?;
     adapter.set_powered(true).await?;
 
-    let all_devices: HashMap<String, DeviceData> = std::fs::read_to_string(get_devices_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    let all_devices: HashMap<String, DeviceData> = load_devices();
 
     let mut verified_macs: HashMap<Address, String> = HashMap::new();
     let mut failed_macs: HashSet<Address> = HashSet::new();
@@ -107,8 +106,8 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
                     {
                         let irk: [u8; 16] = irk_bytes.as_slice().try_into().unwrap();
                         debug!(
-                            "Verifying RPA {} for airpods MAC {} with IRK {}",
-                            addr_str, airpods_mac, info.le_keys.irk
+                            "Verifying RPA {} for airpods MAC {}",
+                            addr_str, airpods_mac
                         );
                         if verify_rpa(&addr_str, &irk) {
                             info!(
@@ -142,7 +141,7 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
 
             if matched_airpods_mac.is_some() {
                 let mut events = dev.events().await?;
-                let tray_handle_clone = tray_handle.clone();
+                let hub = hub.clone();
                 let connecting_macs_clone = Arc::clone(&connecting_macs);
                 tokio::spawn(async move {
                     while let Some(ev) = events.next().await {
@@ -167,89 +166,40 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
                                         let connection_state = apple_data[10] as usize;
                                         debug!("Connection state: {}", connection_state);
                                         if connection_state == 0x00 {
-                                            let pref_path = get_preferences_path();
-                                            let preferences: HashMap<
-                                                String,
-                                                HashMap<String, bool>,
-                                            > = std::fs::read_to_string(&pref_path)
-                                                .ok()
-                                                .and_then(|s| serde_json::from_str(&s).ok())
-                                                .unwrap_or_default();
-                                            let auto_connect = preferences
-                                                .get(matched_airpods_mac.as_ref().unwrap())
-                                                .and_then(|prefs| prefs.get("autoConnect"))
-                                                .copied()
-                                                .unwrap_or(true);
-                                            debug!(
-                                                "Auto-connect preference for {}: {}",
-                                                matched_airpods_mac.as_ref().unwrap(),
-                                                auto_connect
-                                            );
-                                            if auto_connect {
-                                                let real_address =
-                                                    Address::from_str(&addr_str).unwrap();
-                                                let mut cm = connecting_macs_clone.lock().await;
-                                                if cm.contains(&real_address) {
-                                                    info!(
-                                                        "Already connecting to {}, skipping duplicate attempt.",
-                                                        matched_airpods_mac.as_ref().unwrap()
-                                                    );
-                                                    return;
+                                            let airpods_mac = matched_airpods_mac.clone().unwrap();
+                                            if hub.config().auto_connect {
+                                                let real_address = Address::from_str(&addr_str).unwrap();
+                                                {
+                                                    let mut cm = connecting_macs_clone.lock().await;
+                                                    if !cm.insert(real_address) {
+                                                        debug!("Already connecting to {}", airpods_mac);
+                                                        continue;
+                                                    }
                                                 }
-                                                cm.insert(real_address);
-                                                // let adapter_clone = adapter_monitor_clone.clone();
-                                                // let real_device = adapter_clone.device(real_address).unwrap();
-                                                info!(
-                                                    "AirPods are disconnected, attempting to connect to {}",
-                                                    matched_airpods_mac.as_ref().unwrap()
-                                                );
-                                                // if let Err(e) = real_device.connect().await {
-                                                //     info!("Failed to connect to AirPods {}: {}", matched_airpods_mac.as_ref().unwrap(), e);
-                                                // } else {
-                                                //     info!("Successfully connected to AirPods {}", matched_airpods_mac.as_ref().unwrap());
-                                                // }
-                                                // call bluetoothctl connect <mac> for now, I don't know why bluer connect isn't working
-                                                let output =
-                                                    tokio::process::Command::new("bluetoothctl")
-                                                        .arg("connect")
-                                                        .arg(matched_airpods_mac.as_ref().unwrap())
-                                                        .output()
-                                                        .await;
+                                                info!("AirPods {} are free, connecting", airpods_mac);
+                                                // bluetoothctl rather than bluer's connect, which
+                                                // upstream found unreliable here.
+                                                let output = tokio::process::Command::new("bluetoothctl")
+                                                    .arg("connect")
+                                                    .arg(&airpods_mac)
+                                                    .output()
+                                                    .await;
                                                 match output {
-                                                    Ok(output) => {
-                                                        if output.status.success() {
-                                                            info!(
-                                                                "Successfully connected to AirPods {}",
-                                                                matched_airpods_mac
-                                                                    .as_ref()
-                                                                    .unwrap()
-                                                            );
-                                                            cm.remove(&real_address);
-                                                        } else {
-                                                            let stderr = String::from_utf8_lossy(
-                                                                &output.stderr,
-                                                            );
-                                                            info!(
-                                                                "Failed to connect to AirPods {}: {}",
-                                                                matched_airpods_mac
-                                                                    .as_ref()
-                                                                    .unwrap(),
-                                                                stderr
-                                                            );
-                                                        }
+                                                    Ok(o) if o.status.success() => {
+                                                        info!("Connected to AirPods {}", airpods_mac)
                                                     }
-                                                    Err(e) => {
-                                                        info!(
-                                                            "Failed to execute bluetoothctl to connect to AirPods {}: {}",
-                                                            matched_airpods_mac.as_ref().unwrap(),
-                                                            e
-                                                        );
-                                                    }
+                                                    Ok(o) => info!(
+                                                        "Failed to connect to AirPods {}: {}",
+                                                        airpods_mac,
+                                                        String::from_utf8_lossy(&o.stderr)
+                                                    ),
+                                                    Err(e) => info!("Failed to run bluetoothctl: {}", e),
                                                 }
-                                                info!(
-                                                    "Auto-connect is disabled for {}, not attempting to connect.",
-                                                    matched_airpods_mac.as_ref().unwrap()
-                                                );
+                                                // Released on every path, so a failure doesn't
+                                                // block later attempts (librepods PR #877).
+                                                connecting_macs_clone.lock().await.remove(&real_address);
+                                            } else {
+                                                debug!("Auto-connect is off, not connecting {}", airpods_mac);
                                             }
                                         }
 
@@ -293,47 +243,29 @@ pub async fn start_le_monitor(tray_handle: Option<ksni::Handle<MyTray>>) -> blue
                                             (case_byte & 0x7F, (case_byte & 0x80) != 0)
                                         };
 
-                                        if let Some(handle) = &tray_handle_clone {
-                                            handle
-                                                .update(|tray: &mut MyTray| {
-                                                    tray.battery_l = if left_byte == 0xff {
-                                                        None
-                                                    } else {
-                                                        Some(left_battery as u8)
-                                                    };
-                                                    tray.battery_l_status = if left_byte == 0xff {
-                                                        Some(BatteryStatus::Disconnected)
-                                                    } else if left_charging {
-                                                        Some(BatteryStatus::Charging)
-                                                    } else {
-                                                        Some(BatteryStatus::NotCharging)
-                                                    };
-                                                    tray.battery_r = if right_byte == 0xff {
-                                                        None
-                                                    } else {
-                                                        Some(right_battery as u8)
-                                                    };
-                                                    tray.battery_r_status = if right_byte == 0xff {
-                                                        Some(BatteryStatus::Disconnected)
-                                                    } else if right_charging {
-                                                        Some(BatteryStatus::Charging)
-                                                    } else {
-                                                        Some(BatteryStatus::NotCharging)
-                                                    };
-                                                    tray.battery_c = if case_byte == 0xff {
-                                                        None
-                                                    } else {
-                                                        Some(case_battery as u8)
-                                                    };
-                                                    tray.battery_c_status = if case_byte == 0xff {
-                                                        Some(BatteryStatus::Disconnected)
-                                                    } else if case_charging {
-                                                        Some(BatteryStatus::Charging)
-                                                    } else {
-                                                        Some(BatteryStatus::NotCharging)
-                                                    };
-                                                })
-                                                .await;
+                                        // Only while the control channel is down: when it's
+                                        // up, its reports are exact and come first.
+                                        if let Some(ref airpods_mac) = matched_airpods_mac
+                                            && let Some(st) = hub.state(airpods_mac).await
+                                            && !st.ready
+                                        {
+                                            let to_battery = |byte: i32, level: i32, charging: bool| {
+                                                if byte == 0xff {
+                                                    Battery::default()
+                                                } else {
+                                                    Battery { level, charging }
+                                                }
+                                            };
+                                            let l = to_battery(left_byte, left_battery, left_charging);
+                                            let r = to_battery(right_byte, right_battery, right_charging);
+                                            let c = to_battery(case_byte, case_battery, case_charging);
+                                            hub.update(airpods_mac, |s| {
+                                                s.battery_left = l;
+                                                s.battery_right = r;
+                                                s.battery_case = c;
+                                                s.battery_source = "ble".to_string();
+                                            })
+                                            .await;
                                         }
 
                                         debug!(

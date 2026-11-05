@@ -1,54 +1,68 @@
 use aes::Aes128;
 use aes::cipher::Array;
 use aes::cipher::{BlockCipherEncrypt, KeyInit};
-use iced::Theme;
-use serde::{Deserialize, Serialize};
+use crate::devices::enums::DeviceData;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
+    match std::env::var(var) {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(fallback),
+    }
+}
+
+/// Known AirPods and their BLE keys. Holds secrets (IRK, encryption key), so it is
+/// written with mode 0600.
 pub fn get_devices_path() -> PathBuf {
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .unwrap_or_else(|_| format!("{}/.local/share", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(data_dir)
-        .join("librepods")
+    xdg_dir("XDG_DATA_HOME", ".local/share")
+        .join("podsd")
         .join("devices.json")
 }
 
-pub fn get_preferences_path() -> PathBuf {
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .unwrap_or_else(|_| format!("{}/.config", std::env::var("HOME").unwrap_or_default()));
-    PathBuf::from(config_dir)
-        .join("librepods")
-        .join("preferences.json")
+pub fn get_config_path() -> PathBuf {
+    xdg_dir("XDG_CONFIG_HOME", ".config")
+        .join("podsd")
+        .join("config.json")
 }
 
-pub fn get_app_settings_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
-        .unwrap_or_else(|_| format!("{}/.config", home));
-
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .unwrap_or_else(|_| format!("{}/.local/share", home));
-
-    let new_path = PathBuf::from(&config_dir)
-        .join("librepods")
-        .join("app_settings.json");
-
-    let old_path = PathBuf::from(&data_dir)
-        .join("app_settings.json");
-
-    // migrate if needed
-    if old_path.exists() && !new_path.exists() {
-        if let Some(parent) = new_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+/// Writes the devices file atomically (temp file + rename) and owner-only.
+pub fn save_devices(devices: &HashMap<String, DeviceData>) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = get_devices_path();
+    let json = match serde_json::to_string_pretty(devices) {
+        Ok(j) => j,
+        Err(e) => {
+            log::error!("Failed to serialize devices: {}", e);
+            return;
         }
-
-        if std::fs::copy(&old_path, &new_path).is_ok() {
-            let _ = std::fs::remove_file(&old_path);
-        }
+    };
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        log::error!("Failed to create {}: {}", parent.display(), e);
+        return;
     }
+    let tmp = path.with_extension("json.tmp");
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(json.as_bytes()))
+        .and_then(|_| std::fs::rename(&tmp, &path));
+    if let Err(e) = result {
+        log::error!("Failed to save {}: {}", path.display(), e);
+    }
+}
 
-    new_path
+pub fn load_devices() -> HashMap<String, DeviceData> {
+    std::fs::read_to_string(get_devices_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 fn e(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {
@@ -71,88 +85,4 @@ pub fn ah(k: &[u8; 16], r: &[u8; 3]) -> [u8; 3] {
     let mut hash = [0u8; 3];
     hash.copy_from_slice(&encrypted[..3]);
     hash
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum MyTheme {
-    Light,
-    Dark,
-    Dracula,
-    Nord,
-    SolarizedLight,
-    SolarizedDark,
-    GruvboxLight,
-    GruvboxDark,
-    CatppuccinLatte,
-    CatppuccinFrappe,
-    CatppuccinMacchiato,
-    CatppuccinMocha,
-    TokyoNight,
-    TokyoNightStorm,
-    TokyoNightLight,
-    KanagawaWave,
-    KanagawaDragon,
-    KanagawaLotus,
-    Moonfly,
-    Nightfly,
-    Oxocarbon,
-    Ferra,
-}
-
-impl std::fmt::Display for MyTheme {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Light => "Light",
-            Self::Dark => "Dark",
-            Self::Dracula => "Dracula",
-            Self::Nord => "Nord",
-            Self::SolarizedLight => "Solarized Light",
-            Self::SolarizedDark => "Solarized Dark",
-            Self::GruvboxLight => "Gruvbox Light",
-            Self::GruvboxDark => "Gruvbox Dark",
-            Self::CatppuccinLatte => "Catppuccin Latte",
-            Self::CatppuccinFrappe => "Catppuccin Frappé",
-            Self::CatppuccinMacchiato => "Catppuccin Macchiato",
-            Self::CatppuccinMocha => "Catppuccin Mocha",
-            Self::TokyoNight => "Tokyo Night",
-            Self::TokyoNightStorm => "Tokyo Night Storm",
-            Self::TokyoNightLight => "Tokyo Night Light",
-            Self::KanagawaWave => "Kanagawa Wave",
-            Self::KanagawaDragon => "Kanagawa Dragon",
-            Self::KanagawaLotus => "Kanagawa Lotus",
-            Self::Moonfly => "Moonfly",
-            Self::Nightfly => "Nightfly",
-            Self::Oxocarbon => "Oxocarbon",
-            Self::Ferra => "Ferra",
-        })
-    }
-}
-
-impl From<MyTheme> for Theme {
-    fn from(my_theme: MyTheme) -> Self {
-        match my_theme {
-            MyTheme::Light => Theme::Light,
-            MyTheme::Dark => Theme::Dark,
-            MyTheme::Dracula => Theme::Dracula,
-            MyTheme::Nord => Theme::Nord,
-            MyTheme::SolarizedLight => Theme::SolarizedLight,
-            MyTheme::SolarizedDark => Theme::SolarizedDark,
-            MyTheme::GruvboxLight => Theme::GruvboxLight,
-            MyTheme::GruvboxDark => Theme::GruvboxDark,
-            MyTheme::CatppuccinLatte => Theme::CatppuccinLatte,
-            MyTheme::CatppuccinFrappe => Theme::CatppuccinFrappe,
-            MyTheme::CatppuccinMacchiato => Theme::CatppuccinMacchiato,
-            MyTheme::CatppuccinMocha => Theme::CatppuccinMocha,
-            MyTheme::TokyoNight => Theme::TokyoNight,
-            MyTheme::TokyoNightStorm => Theme::TokyoNightStorm,
-            MyTheme::TokyoNightLight => Theme::TokyoNightLight,
-            MyTheme::KanagawaWave => Theme::KanagawaWave,
-            MyTheme::KanagawaDragon => Theme::KanagawaDragon,
-            MyTheme::KanagawaLotus => Theme::KanagawaLotus,
-            MyTheme::Moonfly => Theme::Moonfly,
-            MyTheme::Nightfly => Theme::Nightfly,
-            MyTheme::Oxocarbon => Theme::Oxocarbon,
-            MyTheme::Ferra => Theme::Ferra,
-        }
-    }
 }

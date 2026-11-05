@@ -1,0 +1,13 @@
+[Unit]
+Description=podsd AirPods daemon
+After=bluetooth.target wireplumber.service
+
+[Service]
+Type=dbus
+BusName=io.github.madeitdisfar.Podsd
+ExecStart=%h/.local/bin/podsd
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,336 +1,240 @@
+//! podsd: AirPods daemon. Talks to the AirPods over Bluetooth (the AACP protocol
+//! reverse engineered by LibrePods) and serves their state on the session bus.
+
+mod api;
 mod bluetooth;
+mod config;
+mod dbus_api;
 mod devices;
+mod hub;
 mod media_controller;
-mod ui;
+mod settings;
+mod state;
 mod utils;
 
-use crate::bluetooth::discovery::{find_connected_airpods, find_other_managed_devices};
-use crate::bluetooth::le::start_le_monitor;
-use crate::bluetooth::managers::DeviceManagers;
-use crate::devices::enums::DeviceData;
-use crate::ui::messages::BluetoothUIMessage;
-use crate::ui::tray::MyTray;
-use crate::utils::{get_app_settings_path, get_devices_path};
-use bluer::{Address, InternalErrorKind};
+use crate::api::{BUS_NAME, ROOT_PATH};
+use crate::config::Config;
+use crate::dbus_api::ManagerIface;
+use crate::devices::enums::{DeviceInformation, DeviceType};
+use crate::hub::Hub;
 use clap::Parser;
-use dbus::arg::{RefArg, Variant};
-use dbus::blocking::Connection;
-use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
-use dbus::message::MatchRule;
-use devices::airpods::AirPodsDevice;
-use ksni::TrayMethods;
-use log::{debug, info, warn};
+use futures::StreamExt;
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
-use std::env;
-use std::sync::atomic::{AtomicBool};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::sync::mpsc::unbounded_channel;
+use zbus::fdo::{ObjectManager, ObjectManagerProxy, RequestNameFlags, RequestNameReply};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{Connection, MatchRule, MessageStream};
+
+/// The AACP service UUID: BlueZ lists it for AirPods (and Beats) only.
+const AACP_UUID: &str = "74ec2172-0bad-4d01-8f77-997b2be0722a";
 
 #[derive(Parser)]
+#[command(version, about = "AirPods daemon: battery, ear detection, listening modes and settings over D-Bus")]
 struct Args {
-    #[arg(long, short = 'd', help = "Enable debug logging")]
+    /// Log debug messages (includes raw AACP packets).
+    #[arg(long, short = 'd')]
     debug: bool,
-    #[arg(
-        long,
-        help = "Disable system tray, useful if your environment doesn't support AppIndicator or StatusNotifier"
-    )]
-    no_tray: bool,
-    #[arg(long, help = "Start the application minimized to tray")]
-    start_minimized: bool,
-    #[arg(
-        long,
-        help = "Enable Bluetooth LE debug logging. Only use when absolutely necessary; this produces a lot of logs."
-    )]
-    le_debug: bool,
-    #[arg(long, short = 'v', help = "Show application version and exit")]
-    version: bool
 }
 
-fn main() -> iced::Result {
+type BluezObjects = HashMap<OwnedObjectPath, HashMap<zbus::names::OwnedInterfaceName, HashMap<String, OwnedValue>>>;
+
+fn prop_str(props: &HashMap<String, OwnedValue>, key: &str) -> Option<String> {
+    props.get(key).and_then(|v| v.downcast_ref::<&str>().ok().map(|s| s.to_string()))
+}
+
+fn prop_bool(props: &HashMap<String, OwnedValue>, key: &str) -> Option<bool> {
+    props.get(key).and_then(|v| v.downcast_ref::<bool>().ok())
+}
+
+fn has_aacp(props: &HashMap<String, OwnedValue>) -> bool {
+    props
+        .get("UUIDs")
+        .and_then(|v| <Vec<String>>::try_from(v.try_clone().ok()?).ok())
+        .is_some_and(|uuids| uuids.iter().any(|u| u.eq_ignore_ascii_case(AACP_UUID)))
+}
+
+async fn bluez_objects(system: &Connection) -> zbus::Result<BluezObjects> {
+    let proxy = ObjectManagerProxy::builder(system)
+        .destination("org.bluez")?
+        .path("/")?
+        .build()
+        .await?;
+    Ok(proxy.get_managed_objects().await?)
+}
+
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
-
-    if args.version {
-        println!(
-            "You are running LibrePods version {}",
-            env!("CARGO_PKG_VERSION")
-        );
-        return Ok(());
-    }
-
-    let log_level = if args.debug { "debug" } else { "info" };
-    // let wayland_display = env::var("WAYLAND_DISPLAY").is_ok();
-    // if wayland_display && env::var("WGPU_BACKEND").is_err() {
-    //     unsafe { env::set_var("WGPU_BACKEND", "gl") };
-    // }
-    if env::var("RUST_LOG").is_err() {
-        unsafe {
-            env::set_var(
-                "RUST_LOG",
-                log_level.to_owned()
-                    + &format!(
-                        ",zbus=warn,winit=warn,tracing=warn,iced_wgpu=warn,wgpu_hal=warn,wgpu_core=warn,cosmic_text=warn,naga=warn,iced_winit=warn,librepods::bluetooth::le={}",
-                        if args.le_debug { "debug" } else { "info" }
-                    ),
-            )
-        };
+    if std::env::var("RUST_LOG").is_err() {
+        let level = if args.debug { "debug" } else { "info" };
+        // SAFETY: still single-threaded user code; nothing reads the environment concurrently.
+        unsafe { std::env::set_var("RUST_LOG", format!("{level},zbus=warn,tracing=warn")) };
     }
     env_logger::init();
 
-    let (ui_tx, ui_rx) = unbounded_channel::<BluetoothUIMessage>();
-
-    let device_managers: Arc<RwLock<HashMap<String, DeviceManagers>>> =
-        Arc::new(RwLock::new(HashMap::new()));
-
-    // Load stem_control initial value from settings JSON, then apply CLI override.
-    if args.no_tray {
-        // Run headless without UI
-        info!("Running in headless mode (no GUI)");
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async_main(ui_tx, device_managers)).unwrap();
-        Ok(())
-    } else {
-        // Run with UI
-        let device_managers_clone = device_managers.clone();
-        std::thread::spawn(|| {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async_main(ui_tx, device_managers_clone))
-                .unwrap();
-        });
-
-        ui::window::start_ui(ui_rx, args.start_minimized, device_managers)
+    if let Err(e) = run().await {
+        error!("{}", e);
+        std::process::exit(1);
     }
 }
 
-async fn async_main(
-    ui_tx: tokio::sync::mpsc::UnboundedSender<BluetoothUIMessage>,
-    device_managers: Arc<RwLock<HashMap<String, DeviceManagers>>>,
-) -> bluer::Result<()> {
-    let args = Args::parse();
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load();
+    debug!("Config: {:?}", config);
 
-    let mut managed_devices_mac: Vec<String> = Vec::new(); // includes ony non-AirPods. AirPods handled separately.
+    let system = Connection::system().await?;
+    let session = Connection::session().await?;
 
-    let devices_path = get_devices_path();
-    let devices_json = std::fs::read_to_string(&devices_path).unwrap_or_else(|e| {
-        log::error!("Failed to read devices file: {}", e);
-        "{}".to_string()
-    });
-    let devices_list: HashMap<String, DeviceData> = serde_json::from_str(&devices_json)
-        .unwrap_or_else(|e| {
-            log::error!("Deserialization failed: {}", e);
-            HashMap::new()
-        });
-    for (mac, device_data) in devices_list.iter() {
-        if device_data.type_ == devices::enums::DeviceType::Nothing {
-            managed_devices_mac.push(mac.clone());
+    let objects = bluez_objects(&system).await?;
+    let local_mac = objects
+        .values()
+        .find_map(|ifaces| {
+            ifaces
+                .iter()
+                .find(|(name, _)| name.as_str() == "org.bluez.Adapter1")
+                .and_then(|(_, props)| prop_str(props, "Address"))
+        })
+        .ok_or("No Bluetooth adapter found")?;
+
+    let hub = Hub::new(session.clone(), system.clone(), config.clone(), local_mac);
+
+    session.object_server().at(ROOT_PATH, ObjectManager).await?;
+    session.object_server().at(ROOT_PATH, ManagerIface).await?;
+
+    // Known AirPods: paired in BlueZ, plus any remembered from an earlier run.
+    let mut connected = Vec::new();
+    for (path, ifaces) in &objects {
+        let Some((_, props)) = ifaces.iter().find(|(n, _)| n.as_str() == "org.bluez.Device1") else {
+            continue;
+        };
+        if !has_aacp(props) || !prop_bool(props, "Paired").unwrap_or(false) {
+            continue;
+        }
+        let Some(address) = prop_str(props, "Address") else {
+            continue;
+        };
+        let name = prop_str(props, "Alias")
+            .or_else(|| prop_str(props, "Name"))
+            .unwrap_or_else(|| "AirPods".to_string());
+        hub.add_device(&address, &name, path.as_str()).await;
+        if prop_bool(props, "Connected").unwrap_or(false) {
+            connected.push(address);
+        }
+    }
+    for (address, data) in utils::load_devices() {
+        if data.type_ == DeviceType::AirPods && !hub.has_device(&address).await {
+            let name = match &data.information {
+                Some(DeviceInformation::AirPods(info)) if !info.name.is_empty() => info.name.clone(),
+                _ => data.name.clone(),
+            };
+            hub.add_device(&address, &name, "").await;
         }
     }
 
-    let tray_handle = if args.no_tray {
-        None
-    } else {
-        let tray = MyTray {
-            conversation_detect_enabled: None,
-            battery_headphone: None,
-            battery_headphone_status: None,
-            battery_l: None,
-            battery_l_status: None,
-            battery_r: None,
-            battery_r_status: None,
-            battery_c: None,
-            battery_c_status: None,
-            connected: false,
-            listening_mode: None,
-            allow_off_option: None,
-            command_tx: None,
-            ui_tx: Some(ui_tx.clone()),
-        };
-        let handle = tray.spawn().await.unwrap();
-        Some(handle)
-    };
+    // Serve before taking the name, so a client that sees the name sees the objects.
+    match session
+        .request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
+        .await?
+    {
+        RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => {}
+        _ => return Err(format!("{BUS_NAME} is taken: is podsd already running?").into()),
+    }
+    info!("podsd {} on the session bus as {}", env!("CARGO_PKG_VERSION"), BUS_NAME);
 
-    let session = bluer::Session::new().await?;
-    let adapter = session.default_adapter().await?;
-    adapter.set_powered(true).await?;
-
-    let le_tray_clone = tray_handle.clone();
-    tokio::spawn(async move {
-        info!("Starting LE monitor...");
-        if let Err(e) = start_le_monitor(le_tray_clone).await {
-            log::error!("LE monitor error: {}", e);
-        }
-    });
-
-    info!("Listening for new connections.");
-
-    info!("Checking for connected devices...");
-    match find_connected_airpods(&adapter).await {
-        Ok(device) => {
-            let name = device
-                .name()
-                .await?
-                .unwrap_or_else(|| "Unknown".to_string());
-            info!("Found connected AirPods: {}, initializing.", name);
-            let airpods_device =
-                AirPodsDevice::new(device.address(), tray_handle.clone(), ui_tx.clone()).await;
-
-            let mut managers = device_managers.write().await;
-            // let dev_managers = DeviceManagers::with_both(airpods_device.aacp_manager.clone(), airpods_device.att_manager.clone());
-            let dev_managers = DeviceManagers::with_aacp(airpods_device.aacp_manager.clone());
-            managers
-                .entry(device.address().to_string())
-                .or_insert(dev_managers)
-                .set_aacp(airpods_device.aacp_manager);
-            drop(managers);
-            if let Err(e) = ui_tx.send(BluetoothUIMessage::DeviceConnected(
-                device.address().to_string(),
-            )) {
-                warn!("Failed to send DeviceConnected UI message: {:?}", e);
-            }
-        }
-        Err(_) => {
-            info!("No connected AirPods found.");
-        }
+    for address in connected {
+        hub.on_connected(&address).await;
     }
 
-    match find_other_managed_devices(&adapter, managed_devices_mac.clone()).await {
-        Ok(devices) => {
-            for device in devices {
-                let addr_str = device.address().to_string();
-                info!(
-                    "Found connected managed device: {}, initializing.",
-                    addr_str
-                );
-                let type_ = devices_list.get(&addr_str).unwrap().type_.clone();
-                let ui_tx_clone = ui_tx.clone();
-                let device_managers = device_managers.clone();
-                tokio::spawn(async move {
-                    let mut managers = device_managers.write().await;
-                    if type_ == devices::enums::DeviceType::Nothing {
-                        let dev = devices::nothing::NothingDevice::new(
-                            device.address(),
-                            ui_tx_clone.clone(),
-                        )
-                        .await;
-                        let dev_managers = DeviceManagers::with_att(dev.att_manager.clone());
-                        managers
-                            .entry(addr_str.clone())
-                            .or_insert(dev_managers)
-                            .set_att(dev.att_manager);
-                        if let Err(e) = ui_tx_clone.send(BluetoothUIMessage::DeviceConnected(addr_str)) {
-                            warn!("Failed to send DeviceConnected UI message: {:?}", e);
-                        }
-                    }
-                    drop(managers)
-                });
-            }
-        }
-        Err(e) => {
-            log::debug!("type of error: {:?}", e.kind);
-            if e.kind
-                != bluer::ErrorKind::Internal(InternalErrorKind::Io(std::io::ErrorKind::NotFound))
-            {
-                log::error!("Error finding other managed devices: {}", e);
-            } else {
-                info!("No other managed devices found.");
-            }
-        }
-    }
+    tokio::spawn(watch_bluez(hub.clone()));
 
-    let conn = Connection::new_system()?;
-    let rule = MatchRule::new_signal("org.freedesktop.DBus.Properties", "PropertiesChanged");
-    conn.add_match(rule, move |_: (), conn, msg| {
-        let Some(path) = msg.path() else {
-            return true;
-        };
-        if !path.contains("/org/bluez/hci") || !path.contains("/dev_") {
-            return true;
-        }
-        // debug!("PropertiesChanged signal for path: {}", path);
-        let Ok((iface, changed, _)) =
-            msg.read3::<String, HashMap<String, Variant<Box<dyn RefArg>>>, Vec<String>>()
-        else {
-            return true;
-        };
-        if iface != "org.bluez.Device1" {
-            return true;
-        }
-        let Some(connected_var) = changed.get("Connected") else {
-            return true;
-        };
-        let Some(is_connected) = connected_var.0.as_ref().as_u64() else {
-            return true;
-        };
-        let proxy = conn.with_proxy("org.bluez", path, std::time::Duration::from_millis(5000));
-        let Ok(uuids) = proxy.get::<Vec<String>>("org.bluez.Device1", "UUIDs") else {
-            return true;
-        };
-        let target_uuid = "74ec2172-0bad-4d01-8f77-997b2be0722a";
-
-        let Ok(addr_str) = proxy.get::<String>("org.bluez.Device1", "Address") else {
-            return true;
-        };
-        let Ok(addr) = addr_str.parse::<Address>() else {
-            return true;
-        };
-        if is_connected==0 {
-            if let Err(e) = ui_tx.send(BluetoothUIMessage::DeviceDisconnected(addr_str.clone())) {
-                warn!("Failed to send DeviceConnected UI message: {:?}", e);
-            }
-            return true
-        }
-        if managed_devices_mac.contains(&addr_str) {
-            info!("Managed device connected: {}, initializing", addr_str);
-            let type_ = devices_list.get(&addr_str).unwrap().type_.clone();
-            if type_ == devices::enums::DeviceType::Nothing {
-                let ui_tx_clone = ui_tx.clone();
-                let device_managers = device_managers.clone();
-                tokio::spawn(async move {
-                    let mut managers = device_managers.write().await;
-                    let dev = devices::nothing::NothingDevice::new(addr, ui_tx_clone.clone()).await;
-                    let dev_managers = DeviceManagers::with_att(dev.att_manager.clone());
-                    managers
-                        .entry(addr_str.clone())
-                        .or_insert(dev_managers)
-                        .set_att(dev.att_manager);
-                    drop(managers);
-                    if let Err(e) = ui_tx_clone.send(BluetoothUIMessage::DeviceConnected(addr_str.clone())) {
-                        warn!("Failed to send DeviceConnected UI message: {:?}", e);
-                    }
-                });
-            }
-            return true;
-        }
-
-        if !uuids.iter().any(|u| u.to_lowercase() == target_uuid) {
-            return true;
-        }
-        let name = proxy
-            .get::<String>("org.bluez.Device1", "Name")
-            .unwrap_or_else(|_| "Unknown".to_string());
-        info!("AirPods connected: {}, initializing", name);
-        let handle_clone = tray_handle.clone();
-        let ui_tx_clone = ui_tx.clone();
-        let device_managers = device_managers.clone();
+    if config.ble_monitor {
+        let hub = hub.clone();
         tokio::spawn(async move {
-            let airpods_device = AirPodsDevice::new(addr, handle_clone, ui_tx_clone.clone()).await;
-            let mut managers = device_managers.write().await;
-            // let dev_managers = DeviceManagers::with_both(airpods_device.aacp_manager.clone(), airpods_device.att_manager.clone());
-            let dev_managers = DeviceManagers::with_aacp(airpods_device.aacp_manager.clone());
-            managers
-                .entry(addr_str.clone())
-                .or_insert(dev_managers)
-                .set_aacp(airpods_device.aacp_manager);
-            drop(managers);
-            if let Err(e) = ui_tx_clone.send(BluetoothUIMessage::DeviceConnected(addr_str.clone())) {
-                warn!("Failed to send DeviceConnected UI message: {:?}", e);
+            if let Err(e) = bluetooth::le::start_le_monitor(hub).await {
+                warn!("BLE monitor stopped: {} (needs bluetoothd --experimental)", e);
             }
         });
-        true
-    })?;
-
-    info!("Listening for Bluetooth connections via D-Bus...");
-    loop {
-        conn.process(std::time::Duration::from_millis(1000))?;
     }
+
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+    info!("Shutting down");
+    hub.shutdown().await;
+    Ok(())
+}
+
+/// Follows BlueZ: AirPods connecting and disconnecting, and newly paired ones.
+async fn watch_bluez(hub: Hub) {
+    if let Err(e) = watch_bluez_inner(&hub).await {
+        error!("Lost BlueZ: {}", e);
+        std::process::exit(1);
+    }
+}
+
+async fn watch_bluez_inner(hub: &Hub) -> zbus::Result<()> {
+    let system = hub.system().clone();
+    let rule = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.bluez")?
+        .interface("org.freedesktop.DBus.Properties")?
+        .member("PropertiesChanged")?
+        .path_namespace("/org/bluez")?
+        .arg(0, "org.bluez.Device1")?
+        .build();
+    let mut stream = MessageStream::for_match_rule(rule, &system, None).await?;
+    info!("Watching BlueZ for AirPods");
+
+    while let Some(msg) = stream.next().await {
+        let msg = msg?;
+        let header = msg.header();
+        let Some(path) = header.path() else { continue };
+        let Ok((_, changed, _)) = msg
+            .body()
+            .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+        else {
+            continue;
+        };
+        let Some(is_connected) = prop_bool(&changed, "Connected") else {
+            continue;
+        };
+
+        let props: HashMap<String, OwnedValue> = match system
+            .call_method(
+                Some("org.bluez"),
+                path.as_str(),
+                Some("org.freedesktop.DBus.Properties"),
+                "GetAll",
+                &("org.bluez.Device1",),
+            )
+            .await
+            .and_then(|reply| reply.body().deserialize::<HashMap<String, OwnedValue>>())
+        {
+            Ok(p) => p,
+            Err(e) => {
+                debug!("Can't read {}: {}", path, e);
+                continue;
+            }
+        };
+        let Some(address) = prop_str(&props, "Address") else { continue };
+        if !hub.has_device(&address).await {
+            if !has_aacp(&props) {
+                continue;
+            }
+            let name = prop_str(&props, "Alias").unwrap_or_else(|| "AirPods".to_string());
+            hub.add_device(&address, &name, path.as_str()).await;
+        } else {
+            hub.add_device(&address, "", path.as_str()).await;
+        }
+
+        if is_connected {
+            info!("{} connected", address);
+            hub.on_connected(&address).await;
+        } else {
+            hub.on_disconnected(&address).await;
+        }
+    }
+    Ok(())
 }
