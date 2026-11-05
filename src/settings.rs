@@ -4,11 +4,24 @@
 //!
 //! Encodings follow LibrePods' Android app (AirPodsViewModel / *SettingsScreen):
 //! booleans are 0x01 on / 0x02 off.
+//!
+//! The AirPods report every setting when the control channel opens, but don't
+//! confirm a change (only listening mode changes come back), so a setting is
+//! taken as changed once the write is sent, as the Android app does.
 
 use crate::bluetooth::aacp::ControlCommandIdentifiers as Id;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Settings the AirPods take but never report, not even when connecting (seen
+/// on AirPods Pro 3). podsd remembers the last value set per pair; until one is
+/// set, the default here (None: unknown).
+pub const UNREPORTED: &[(&str, Option<bool>)] = &[
+    ("allow-off-mode", None),
+    // On from the factory
+    ("ear-detection", Some(true)),
+];
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SettingValue {
     Bool(bool),

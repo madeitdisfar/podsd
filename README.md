@@ -23,7 +23,7 @@ PipeWire + WirePlumber.
 | Ear detection state | works |
 | Settings read (listening mode, Conversation Awareness, …) | works |
 | D-Bus API, `podsctl`, `watch` stream | works |
-| Changing listening mode / settings | sent; not yet confirmed with the buds worn (the AirPods ignore mode changes while both are in the case) |
+| Changing listening mode / settings | works (checked by reading the settings back after reconnecting; the AirPods ignore mode changes while both are in the case) |
 | Pause on removal, Conversation Awareness volume, takeover | LibrePods' logic, not yet re-tested here |
 | Battery from BLE, auto-connect (`bleMonitor`) | needs `bluetoothd --experimental`; not tested |
 
@@ -144,8 +144,13 @@ busctl --user call io.github.madeitdisfar.Podsd \
 | `volume-swipe-length` | choice | `default`, `longer`, `longest` |
 | `press-speed`, `press-hold-duration` | choice | `default`, `slower`, `slowest` |
 
-A setting the AirPods never reported is missing from `Settings` (on AirPods Pro 3:
-`allow-off-mode` and `ear-detection`). Encodings follow LibrePods' Android app. Adding one
+The AirPods report every setting when the control channel opens but don't confirm
+changes (only listening mode changes come back), so `SetSetting` updates `Settings` once
+the write is sent, as LibrePods' Android app does. Two settings are never reported at all
+on AirPods Pro 3, `allow-off-mode` and `ear-detection`: podsd remembers the last value
+set for each pair (`~/.local/share/podsd/remembered.json`) and shows that; until one is
+set, `ear-detection` is on (the factory setting) and `allow-off-mode` is missing.
+Encodings follow LibrePods' Android app. Adding one
 is an entry in [`src/settings.rs`](src/settings.rs); clients pick it up from
 `DescribeSettings`.
 

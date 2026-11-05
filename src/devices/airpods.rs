@@ -83,7 +83,21 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
         }
     }
 
-    hub.update(&address, |s| s.ready = true).await;
+    // Settings the AirPods never report: what was last set here, else the default
+    let remembered = crate::utils::load_remembered().remove(&address).unwrap_or_default();
+    hub.update(&address, |s| {
+        s.ready = true;
+        for (key, default) in settings::UNREPORTED {
+            let value = remembered
+                .get(*key)
+                .cloned()
+                .or(default.map(settings::SettingValue::Bool));
+            if let Some(value) = value {
+                s.settings.entry(key.to_string()).or_insert(value);
+            }
+        }
+    })
+    .await;
 
     let media = MediaController::new(address.clone(), hub.local_mac().to_string());
     media

@@ -191,7 +191,20 @@ impl DeviceIface {
             .ok_or_else(|| fdo::Error::InvalidArgs(format!("{key}: unsupported value type")))?;
         let raw = def.encode(&value).map_err(fdo::Error::InvalidArgs)?;
         info!("{}: {} -> {:?}", self.address, key, value);
-        self.send(def.id, &raw).await
+        self.send(def.id, &raw).await?;
+        // The AirPods don't confirm settings, only listening mode changes (which
+        // they may refuse, e.g. Off while it isn't allowed): take the rest as set.
+        if def.id != ControlCommandIdentifiers::ListeningMode {
+            if settings::UNREPORTED.iter().any(|(k, _)| *k == key) {
+                crate::utils::remember_setting(&self.address, &key, &value);
+            }
+            self.hub
+                .update(&self.address, |s| {
+                    s.settings.insert(key, value);
+                })
+                .await;
+        }
+        Ok(())
     }
 
     /// Every setting: (key, type "bool" | "choice" | "int", label, choices, min, max).
