@@ -44,9 +44,8 @@ struct Entry {
     bluez_path: String,
     session: Option<Session>,
     attaching: bool,
-    /// Per advertising bud: what it last said about the lid (None: it isn't in
-    /// the case, so it can't tell), when, and when it was last heard at all
-    lids: HashMap<bluer::Address, (Option<bool>, std::time::Instant, std::time::Instant)>,
+    /// Per advertising bud: its last lid byte and when it was last heard
+    lids: HashMap<bluer::Address, (u8, std::time::Instant)>,
 }
 
 /// BlueZ passes an advert on only when it changes, so an open lid can be quiet
@@ -179,31 +178,33 @@ impl Hub {
         let config = &self.0.config;
         let strong = advert.rssi.is_none_or(|r| r >= config.case_open_rssi);
         let was_open = self.state(address).await.is_some_and(|s| s.case_open);
-        // Both buds advertise, alternately: the lid is what the most recent bud
-        // still in the case said. A bud taken out can't tell, so it doesn't count
-        let lid = {
+        // Both buds advertise, alternately, and a bud outside the case keeps
+        // repeating a stale lid byte: only a change in a bud's lid byte is news
+        // about the lid, and only while a bud is in the case
+        let news = {
             let mut devices = self.0.devices.lock().await;
             let Some(entry) = devices.get_mut(address) else {
                 return;
             };
-            let now = std::time::Instant::now();
-            entry.lids.insert(advert.source, (advert.lid_open(), now, now));
-            entry
+            let previous = entry
                 .lids
-                .values()
-                .filter(|(lid, _, heard)| lid.is_some() && heard.elapsed() < ADVERT_TIMEOUT)
-                .max_by_key(|(_, said, _)| *said)
-                .and_then(|(lid, _, _)| *lid)
-                .unwrap_or(false)
+                .insert(advert.source, (advert.lid, std::time::Instant::now()))
+                .map(|(lid, _)| lid);
+            (previous != Some(advert.lid) && advert.in_case()).then(|| advert.lid_open())
         };
         // Opens only nearby; once open, only a closed lid (or silence) ends it,
         // so the signal strength wobbling around the threshold doesn't
-        let open = lid && (was_open || strong);
+        let open = match news {
+            Some(true) => was_open || strong,
+            Some(false) => false,
+            None => was_open,
+        };
         debug!(
-            "Advert {}: lid {:02x} status {:02x} connection {:02x} rssi {:?} -> open {} | L {:?} R {:?} C {:?}",
-            address, advert.lid, advert.status, advert.connection, advert.rssi, open,
+            "Advert {} from {}: lid {:02x} status {:02x} connection {:02x} rssi {:?} news {:?} -> open {} | L {:?} R {:?} C {:?}",
+            address, advert.source, advert.lid, advert.status, advert.connection, advert.rssi, news, open,
             advert.left, advert.right, advert.case
         );
+
         let connected = self.state(address).await.is_some_and(|s| s.connected);
         let reading = |p: Option<(i32, bool)>| {
             p.map(|(l, c)| crate::state::Battery::reading(l, c))
@@ -243,7 +244,7 @@ impl Hub {
         if let Some(entry) = self.0.devices.lock().await.get_mut(address)
             && let Some(lid) = entry.lids.get_mut(&source)
         {
-            lid.2 = std::time::Instant::now();
+            lid.1 = std::time::Instant::now();
         }
     }
 
@@ -255,7 +256,7 @@ impl Hub {
                 return;
             };
             entry.lids.remove(&source);
-            entry.lids.values().all(|(_, _, heard)| heard.elapsed() > ADVERT_TIMEOUT)
+            entry.lids.values().all(|(_, heard)| heard.elapsed() > ADVERT_TIMEOUT)
         };
         if gone {
             self.update(address, |s| s.case_open = false).await;
@@ -274,7 +275,7 @@ impl Hub {
                         .iter()
                         .filter(|(_, e)| {
                             e.state.case_open
-                                && e.lids.values().all(|(_, _, heard)| heard.elapsed() > ADVERT_TIMEOUT)
+                                && e.lids.values().all(|(_, heard)| heard.elapsed() > ADVERT_TIMEOUT)
                         })
                         .map(|(a, _)| a.clone())
                         .collect()

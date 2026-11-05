@@ -54,21 +54,21 @@ pub struct Advert {
 }
 
 impl Advert {
-    /// The advertising bud is in the case. Status bits, as seen on AirPods
-    /// Pro 3 (each bud advertises, alternately): 0x04 this bud in the case,
-    /// 0x10 the other one; 0x02 / 0x08 the same for ears; 0x20 / 0x40 tell the
-    /// buds apart. In ears 0x2b; both in the open case 0x55 / 0x35; one taken
-    /// out: the one left in 0x25, the one out 0x11.
+    /// A bud is in the case, as far as the advertising bud knows: status bits
+    /// 0x04 and 0x10, one per bud (0x02 / 0x08 for ears). Which bit is which bud
+    /// swaps with the primary (0x20 / 0x40), so only "either" is reliable. Seen
+    /// on AirPods Pro 3: in ears 0x2b; both in the open case 0x15 / 0x35 / 0x55 /
+    /// 0x75; one taken out: the one left in 0x25 or 0x71, the one out 0x11 or 0x00.
     pub fn in_case(&self) -> bool {
-        self.status & 0x04 != 0
+        self.status & 0x14 != 0
     }
 
-    /// The lid's state, known only while a bud is in the case (in ears the lid
-    /// byte read 0x12, "open"): bit 3 of the lid byte is set while it's closed
-    /// (open 0x33 -> closed 0x3b, open 0x31 -> closed 0x39; the low bits count
-    /// openings). None: no bud in the case, so unknown.
-    pub fn lid_open(&self) -> Option<bool> {
-        self.in_case().then_some(self.lid & 0x08 == 0)
+    /// What this advert says about the lid: bit 3 of the lid byte is set while
+    /// it's closed (0x31 open -> 0x39 closed; the low bits count openings). A bud
+    /// outside the case keeps repeating its last value (0x11 taken out, 0x12 in
+    /// ears), so the hub only trusts a change in a bud's lid byte.
+    pub fn lid_open(&self) -> bool {
+        self.lid & 0x08 == 0
     }
 
     fn parse(source: Address, apple: &[u8], enc_key: Option<&[u8; 16]>, rssi: Option<i16>) -> Option<Advert> {
