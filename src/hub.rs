@@ -44,7 +44,13 @@ struct Entry {
     bluez_path: String,
     session: Option<Session>,
     attaching: bool,
+    /// The last BLE advert (CaseOpen ends a few seconds after they stop)
+    last_advert: Option<std::time::Instant>,
 }
+
+/// Adverts come several times a second while the lid is open; this long
+/// without one, it's closed (or the case went out of range).
+const ADVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Clone)]
 pub struct Hub(Arc<Inner>);
@@ -97,8 +103,20 @@ impl Hub {
                     bluez_path: bluez_path.to_string(),
                     session: None,
                     attaching: false,
+                    last_advert: None,
                 },
             );
+            // The case's last reading, from an earlier run
+            if let Some((level, time)) = crate::utils::load_case_batteries().get(address)
+                && let Some(entry) = devices.get_mut(address)
+            {
+                entry.state.battery_case = crate::state::Battery {
+                    level: *level,
+                    charging: false,
+                    live: false,
+                    time: *time,
+                };
+            }
         }
         info!("Known AirPods: {} ({})", name, address);
         let iface = DeviceIface::new(self.clone(), address.to_string());
@@ -152,6 +170,85 @@ impl Hub {
         {
             warn!("Failed to set the alias of {}: {}", address, e);
         }
+    }
+
+    /// A BLE advert from this pair (bluetooth/le.rs).
+    pub async fn on_advert(&self, address: &str, advert: crate::bluetooth::le::Advert) {
+        let config = &self.0.config;
+        let strong = advert.rssi.is_none_or(|r| r >= config.case_open_rssi);
+        let open = advert.lid_open() && strong;
+        debug!(
+            "Advert {}: lid {:02x} status {:02x} connection {:02x} rssi {:?} -> open {} | L {:?} R {:?} C {:?}",
+            address, advert.lid, advert.status, advert.connection, advert.rssi, open,
+            advert.left, advert.right, advert.case
+        );
+        let connected = {
+            let mut devices = self.0.devices.lock().await;
+            let Some(entry) = devices.get_mut(address) else {
+                return;
+            };
+            entry.last_advert = Some(std::time::Instant::now());
+            entry.state.connected
+        };
+        let reading = |p: Option<(i32, bool)>| {
+            p.map(|(l, c)| crate::state::Battery::reading(l, c))
+                .unwrap_or_default()
+        };
+        self.update(address, |s| {
+            s.case_open = open;
+            if let Some((level, charging)) = advert.case {
+                s.battery_case = crate::state::Battery::reading(level, charging);
+            }
+            // The control channel's reports are exact; adverts fill in without it
+            if !s.ready && (advert.left.is_some() || advert.right.is_some()) {
+                s.battery_left = reading(advert.left);
+                s.battery_right = reading(advert.right);
+                s.battery_source = "ble".to_string();
+            }
+        })
+        .await;
+        if let Some((level, _)) = advert.case {
+            crate::utils::save_case_battery(address, level, crate::state::now());
+        }
+        if config.auto_connect && open && !connected && advert.connection == 0x00 {
+            info!("{}: lid open and free, connecting", address);
+            if let Some(path) = self.bluez_path(address).await {
+                let system = self.0.system.clone();
+                tokio::spawn(async move {
+                    let _ = system
+                        .call_method(Some("org.bluez"), path.as_str(), Some("org.bluez.Device1"), "Connect", &())
+                        .await;
+                });
+            }
+        }
+    }
+
+    pub async fn on_advert_lost(&self, address: &str) {
+        self.update(address, |s| s.case_open = false).await;
+    }
+
+    /// Ends CaseOpen once adverts stop.
+    pub fn start_advert_timeout(&self) {
+        let hub = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let stale: Vec<String> = {
+                    let devices = hub.0.devices.lock().await;
+                    devices
+                        .iter()
+                        .filter(|(_, e)| {
+                            e.state.case_open
+                                && e.last_advert.is_none_or(|t| t.elapsed() > ADVERT_TIMEOUT)
+                        })
+                        .map(|(a, _)| a.clone())
+                        .collect()
+                };
+                for address in stale {
+                    hub.update(&address, |s| s.case_open = false).await;
+                }
+            }
+        });
     }
 
     pub async fn has_device(&self, address: &str) -> bool {

@@ -55,6 +55,39 @@ pub fn remember_setting(address: &str, key: &str, value: &SettingValue) {
     }
 }
 
+/// The case's last battery reading per pair: { address: [level, time] }. The case
+/// only reports while a bud is in it, so this is what shows the rest of the time.
+fn get_case_battery_path() -> PathBuf {
+    xdg_dir("XDG_DATA_HOME", ".local/share")
+        .join("podsd")
+        .join("case-battery.json")
+}
+
+pub fn load_case_batteries() -> HashMap<String, (i32, i64)> {
+    std::fs::read_to_string(get_case_battery_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_case_battery(address: &str, level: i32, time: i64) {
+    let mut all = load_case_batteries();
+    if all.get(address).map(|(l, _)| *l) == Some(level) {
+        return;
+    }
+    all.insert(address.to_string(), (level, time));
+    let path = get_case_battery_path();
+    let result = path
+        .parent()
+        .map(std::fs::create_dir_all)
+        .unwrap_or(Ok(()))
+        .and_then(|_| serde_json::to_string(&all).map_err(std::io::Error::other))
+        .and_then(|json| std::fs::write(&path, json));
+    if let Err(e) = result {
+        log::error!("Failed to save {}: {}", path.display(), e);
+    }
+}
+
 pub fn get_config_path() -> PathBuf {
     xdg_dir("XDG_CONFIG_HOME", ".config")
         .join("podsd")

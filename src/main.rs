@@ -146,6 +146,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tokio::spawn(watch_bluez(hub.clone()));
+    hub.start_advert_timeout();
 
     if config.ble_monitor {
         let hub = hub.clone();

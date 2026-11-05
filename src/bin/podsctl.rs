@@ -8,7 +8,11 @@
 //!     "connected":true,"ready":true,
 //!     "battery":{"left":{"level":100,"charging":true},"right":{…},"case":{…},"headphone":{…}},
 //!     "batterySource":"aacp","ear":{"primary":"in-ear","secondary":"in-case","inEar":true},
-//!     "listeningMode":"noise-cancellation","ownsAudio":true,"settings":{"one-bud-anc":false,…}}]}
+//!     "listeningMode":"noise-cancellation","ownsAudio":true,"caseOpen":false,
+//!     "settings":{"one-bud-anc":false,…}}]}
+//!
+//! battery.case also has "live" (false: the last reading, kept while no bud is
+//! in the case) and "time" (when it was read, Unix seconds).
 //!   {"kind":"stemPress","address":"…","press":"double","bud":"left"}
 //!
 //! A battery level is null when unknown. Exits when stdout closes.
@@ -119,7 +123,13 @@ fn device_json(props: &Props) -> Json {
         "battery": {
             "left": battery(props, "Left"),
             "right": battery(props, "Right"),
-            "case": battery(props, "Case"),
+            "case": {
+                "level": battery(props, "Case")["level"].clone(),
+                "charging": get(props, "ChargingCase"),
+                // false: the last reading (no bud in the case), taken at `time`
+                "live": get(props, "BatteryCaseLive"),
+                "time": get(props, "BatteryCaseTime"),
+            },
             "headphone": battery(props, "Headphone"),
         },
         "batterySource": get(props, "BatterySource"),
@@ -130,6 +140,7 @@ fn device_json(props: &Props) -> Json {
         },
         "listeningMode": get(props, "ListeningMode"),
         "ownsAudio": get(props, "OwnsAudio"),
+        "caseOpen": get(props, "CaseOpen"),
         "settings": get(props, "Settings"),
     })
 }

@@ -10,11 +10,33 @@ pub struct Battery {
     /// Percent, or -1 when unknown or that part isn't there.
     pub level: i32,
     pub charging: bool,
+    /// Read just now (false: the last reading, kept; used for the case, which
+    /// only reports while a bud is in it)
+    pub live: bool,
+    /// When `level` was read (Unix seconds; 0 unknown)
+    pub time: i64,
 }
 
 impl Default for Battery {
     fn default() -> Self {
-        Battery { level: -1, charging: false }
+        Battery { level: -1, charging: false, live: false, time: 0 }
+    }
+}
+
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+impl Battery {
+    pub fn reading(level: i32, charging: bool) -> Self {
+        Battery { level, charging, live: true, time: now() }
+    }
+    /// The same level, no longer live
+    pub fn kept(&self) -> Self {
+        Battery { charging: false, live: false, ..self.clone() }
     }
 }
 
@@ -42,6 +64,8 @@ pub struct DeviceState {
     /// This computer owns the AirPods' audio (vs. another device such as a phone).
     pub owns_audio: bool,
     pub settings: BTreeMap<String, SettingValue>,
+    /// The case's lid is open nearby (from BLE adverts)
+    pub case_open: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -49,6 +73,7 @@ pub enum Prop {
     S(String),
     B(bool),
     I(i32),
+    X(i64),
     Settings(BTreeMap<String, SettingValue>),
 }
 
@@ -58,6 +83,7 @@ impl Prop {
             Prop::S(s) => Value::from(s.clone()),
             Prop::B(b) => Value::from(*b),
             Prop::I(i) => Value::from(*i),
+            Prop::X(x) => Value::from(*x),
             Prop::Settings(map) => Value::from(settings_dict(map)),
         }
     }
@@ -95,7 +121,8 @@ impl DeviceState {
         self.ready = false;
         self.battery_left = Battery::default();
         self.battery_right = Battery::default();
-        self.battery_case = Battery::default();
+        // The case keeps its last reading
+        self.battery_case = self.battery_case.kept();
         self.battery_headphone = Battery::default();
         self.battery_source.clear();
         self.ear_primary.clear();
@@ -122,6 +149,9 @@ impl DeviceState {
             ("ChargingRight", Prop::B(self.battery_right.charging)),
             ("ChargingCase", Prop::B(self.battery_case.charging)),
             ("ChargingHeadphone", Prop::B(self.battery_headphone.charging)),
+            ("BatteryCaseLive", Prop::B(self.battery_case.live)),
+            ("BatteryCaseTime", Prop::X(self.battery_case.time)),
+            ("CaseOpen", Prop::B(self.case_open)),
             ("BatterySource", Prop::S(self.battery_source.clone())),
             ("EarPrimary", Prop::S(self.ear_primary.clone())),
             ("EarSecondary", Prop::S(self.ear_secondary.clone())),

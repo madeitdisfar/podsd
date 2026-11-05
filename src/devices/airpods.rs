@@ -171,24 +171,29 @@ async fn handle_event(
         AACPEvent::BatteryInfo(batteries) => {
             hub.update(address, |s| {
                 for b in &batteries {
-                    let battery = if b.status == BatteryStatus::Disconnected {
-                        Battery::default()
-                    } else {
-                        Battery {
-                            level: b.level as i32,
-                            charging: b.status == BatteryStatus::Charging,
-                        }
-                    };
+                    let absent = b.status == BatteryStatus::Disconnected;
+                    let battery = Battery::reading(b.level as i32, b.status == BatteryStatus::Charging);
                     match b.component {
-                        BatteryComponent::Left => s.battery_left = battery,
-                        BatteryComponent::Right => s.battery_right = battery,
-                        BatteryComponent::Case => s.battery_case = battery,
-                        BatteryComponent::Headphone => s.battery_headphone = battery,
+                        BatteryComponent::Left => s.battery_left = if absent { Battery::default() } else { battery },
+                        BatteryComponent::Right => s.battery_right = if absent { Battery::default() } else { battery },
+                        BatteryComponent::Headphone => {
+                            s.battery_headphone = if absent { Battery::default() } else { battery }
+                        }
+                        // No bud in the case: it can't report, keep its last reading
+                        BatteryComponent::Case => {
+                            s.battery_case = if absent { s.battery_case.kept() } else { battery }
+                        }
                     }
                 }
                 s.battery_source = "aacp".to_string();
             })
             .await;
+            if let Some(case) = batteries
+                .iter()
+                .find(|b| b.component == BatteryComponent::Case && b.status != BatteryStatus::Disconnected)
+            {
+                crate::utils::save_case_battery(address, case.level as i32, crate::state::now());
+            }
         }
         AACPEvent::ControlCommand(status) => {
             let owns = (status.identifier == ControlCommandIdentifiers::OwnsConnection)

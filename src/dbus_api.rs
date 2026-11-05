@@ -137,6 +137,21 @@ impl DeviceIface {
     async fn charging_headphone(&self) -> bool {
         self.st().await.battery_headphone.charging
     }
+    /// The case's battery is the last reading while no bud is in it
+    #[zbus(property)]
+    async fn battery_case_live(&self) -> bool {
+        self.st().await.battery_case.live
+    }
+    /// When BatteryCase was read (Unix seconds, 0 unknown)
+    #[zbus(property)]
+    async fn battery_case_time(&self) -> i64 {
+        self.st().await.battery_case.time
+    }
+    /// The case's lid is open nearby (BLE adverts; needs bleMonitor)
+    #[zbus(property)]
+    async fn case_open(&self) -> bool {
+        self.st().await.case_open
+    }
     #[zbus(property)]
     async fn battery_source(&self) -> String {
         self.st().await.battery_source

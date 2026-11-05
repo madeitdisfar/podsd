@@ -24,11 +24,16 @@ pub struct Config {
     /// Restart WirePlumber when the AirPods have no A2DP profile. Restarting it
     /// interrupts all audio, so it is opt-in.
     pub restart_wireplumber: bool,
-    /// Watch the AirPods' BLE advertisements (battery while connected elsewhere,
-    /// auto-connect). Needs bluetoothd's experimental interfaces (`bluetoothd -E`).
+    /// Watch the AirPods' BLE adverts: case lid open (CaseOpen), battery while
+    /// connected elsewhere. Needs `Experimental = true` in /etc/bluetooth/main.conf;
+    /// without it this does nothing.
     pub ble_monitor: bool,
-    /// With `bleMonitor`: connect the AirPods when they advertise that they're free.
+    /// With `bleMonitor`: connect the AirPods by themselves when their lid opens
+    /// and they're free. Off: a client offers Connect instead.
     pub auto_connect: bool,
+    /// CaseOpen counts only adverts at least this strong (dBm): a case nearby,
+    /// not one across the room.
+    pub case_open_rssi: i16,
 }
 
 impl Default for Config {
@@ -40,8 +45,9 @@ impl Default for Config {
             conversation_volume: true,
             stem_control: false,
             restart_wireplumber: false,
-            ble_monitor: false,
-            auto_connect: true,
+            ble_monitor: true,
+            auto_connect: false,
+            case_open_rssi: -70,
         }
     }
 }

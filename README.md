@@ -25,7 +25,7 @@ PipeWire + WirePlumber.
 | D-Bus API, `podsctl`, `watch` stream | works |
 | Changing listening mode / settings | works (checked by reading the settings back after reconnecting; the AirPods ignore mode changes while both are in the case) |
 | Pause on removal, Conversation Awareness volume, takeover | LibrePods' logic, not yet re-tested here |
-| Battery from BLE, auto-connect (`bleMonitor`) | needs `bluetoothd --experimental`; not tested |
+| BLE adverts (`bleMonitor`): battery while connected elsewhere, `CaseOpen` | adverts received and decrypted (battery matches); the lid bits are still being confirmed |
 
 ## Install
 
@@ -97,6 +97,8 @@ Session bus, service `io.github.madeitdisfar.Podsd`.
 | `Ready` | b | the control channel is up; the properties below are live only then |
 | `BatteryLeft`, `BatteryRight`, `BatteryCase`, `BatteryHeadphone` | i | percent, -1 unknown |
 | `ChargingLeft`, `ChargingRight`, `ChargingCase`, `ChargingHeadphone` | b | |
+| `BatteryCaseLive`, `BatteryCaseTime` | b, x | the case reports only while a bud is in it; otherwise `BatteryCase` is the last reading (kept across restarts), taken at `BatteryCaseTime` (Unix seconds) |
+| `CaseOpen` | b | the case's lid is open nearby (BLE adverts, see `bleMonitor`) |
 | `BatterySource` | s | `aacp`, `ble` (from adverts, while connected elsewhere) or `""` |
 | `EarPrimary`, `EarSecondary` | s | see above |
 | `InEar` | b | at least one bud in an ear |
@@ -167,8 +169,9 @@ Every key is optional:
   "conversationVolume": true,
   "stemControl": false,
   "restartWireplumber": false,
-  "bleMonitor": false,
-  "autoConnect": true
+  "bleMonitor": true,
+  "autoConnect": false,
+  "caseOpenRssi": -70
 }
 ```
 
@@ -180,8 +183,9 @@ Every key is optional:
 | `conversationVolume` | lower the volume while Conversation Awareness hears you speak |
 | `stemControl` | double press: next track, triple press: previous track |
 | `restartWireplumber` | restart WirePlumber when the AirPods have no A2DP profile (cuts all audio for a moment) |
-| `bleMonitor` | watch BLE adverts: battery while connected elsewhere, auto-connect. Needs `bluetoothd --experimental` |
-| `autoConnect` | with `bleMonitor`: connect when the AirPods say they're free |
+| `bleMonitor` | watch the AirPods' BLE adverts: `CaseOpen`, the case's battery, battery while connected elsewhere. Needs `Experimental = true` under `[General]` in `/etc/bluetooth/main.conf` (then `systemctl restart bluetooth`); BlueZ filters for Apple's adverts, so nothing scans actively. Without it, nothing happens |
+| `autoConnect` | with `bleMonitor`: connect by itself when the lid opens and the AirPods are free (off: clients offer Connect) |
+| `caseOpenRssi` | `CaseOpen` only for adverts at least this strong (dBm), so a case across the room doesn't count |
 
 Known AirPods and their BLE keys are kept in `~/.local/share/podsd/devices.json` (mode 0600:
 the keys identify the AirPods and decrypt their adverts).
