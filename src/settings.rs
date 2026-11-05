@@ -76,7 +76,7 @@ pub const SETTINGS: &[SettingDef] = &[
         key: "adaptive-audio-level",
         id: Id::AutoAncStrength,
         kind: Kind::Int { min: 0, max: 100 },
-        label: "Adaptive Audio level (raw, 0-100)",
+        label: "Adaptive Audio level",
     },
     SettingDef {
         key: "one-bud-anc",

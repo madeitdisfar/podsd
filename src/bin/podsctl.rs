@@ -49,7 +49,11 @@ enum Command {
     /// Set the listening mode: off, anc (noise-cancellation), transparency, adaptive.
     Mode { mode: String },
     /// List the settings with their current values.
-    Settings,
+    Settings {
+        /// As a JSON array: [{key, type, label, choices, min, max, value}]
+        #[arg(long)]
+        json: bool,
+    },
     /// Change a setting, e.g. `podsctl set conversation-awareness on`.
     Set { key: String, value: String },
     /// Ask BlueZ to connect the AirPods.
@@ -327,10 +331,23 @@ async fn run(cli: Cli) -> Result<(), String> {
             };
             call(&conn, path, "SetListeningMode", &(mode,)).await?;
         }
-        Command::Settings => {
+        Command::Settings { json } => {
             let reply = call(&conn, path, "DescribeSettings", &()).await?;
             let schema: Schema = reply.body().deserialize().map_err(|e| e.to_string())?;
             let current = get(props, "Settings");
+            if json {
+                let list: Vec<Json> = schema
+                    .into_iter()
+                    .map(|(key, kind, label, choices, min, max)| {
+                        json!({
+                            "key": key, "type": kind, "label": label, "choices": choices,
+                            "min": min, "max": max, "value": current[&key].clone(),
+                        })
+                    })
+                    .collect();
+                println!("{}", Json::Array(list));
+                return Ok(());
+            }
             for (key, kind, label, choices, min, max) in schema {
                 let value = match &current[&key] {
                     Json::Null => "?".to_string(),

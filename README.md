@@ -46,7 +46,7 @@ Logs: `journalctl --user -u podsd`. `podsd --debug` also logs raw packets.
 podsctl status [--json]          state of every known pair
 podsctl watch                    JSON lines: the state now, then on every change
 podsctl mode <off|anc|transparency|adaptive>
-podsctl settings                 every setting, its value and what it accepts
+podsctl settings [--json]        every setting, its value and what it accepts
 podsctl set <key> <value>        e.g. podsctl set conversation-awareness on
 podsctl connect | disconnect
 podsctl rename <name>
