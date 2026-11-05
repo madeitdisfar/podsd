@@ -44,13 +44,15 @@ struct Entry {
     bluez_path: String,
     session: Option<Session>,
     attaching: bool,
-    /// The last BLE advert (CaseOpen ends a few seconds after they stop)
-    last_advert: Option<std::time::Instant>,
+    /// Per advertising bud: what it last said about the lid (None: it isn't in
+    /// the case, so it can't tell), when, and when it was last heard at all
+    lids: HashMap<bluer::Address, (Option<bool>, std::time::Instant, std::time::Instant)>,
 }
 
-/// Adverts come several times a second while the lid is open; this long
-/// without one, it's closed (or the case went out of range).
-const ADVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// BlueZ passes an advert on only when it changes, so an open lid can be quiet
+/// for a while; a closing lid sends its own advert. This long without any sign
+/// of the case (advert or signal strength change), it went out of range.
+const ADVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[derive(Clone)]
 pub struct Hub(Arc<Inner>);
@@ -103,7 +105,7 @@ impl Hub {
                     bluez_path: bluez_path.to_string(),
                     session: None,
                     attaching: false,
-                    last_advert: None,
+                    lids: HashMap::new(),
                 },
             );
             // The case's last reading, from an earlier run
@@ -176,20 +178,33 @@ impl Hub {
     pub async fn on_advert(&self, address: &str, advert: crate::bluetooth::le::Advert) {
         let config = &self.0.config;
         let strong = advert.rssi.is_none_or(|r| r >= config.case_open_rssi);
-        let open = advert.lid_open() && strong;
+        let was_open = self.state(address).await.is_some_and(|s| s.case_open);
+        // Both buds advertise, alternately: the lid is what the most recent bud
+        // still in the case said. A bud taken out can't tell, so it doesn't count
+        let lid = {
+            let mut devices = self.0.devices.lock().await;
+            let Some(entry) = devices.get_mut(address) else {
+                return;
+            };
+            let now = std::time::Instant::now();
+            entry.lids.insert(advert.source, (advert.lid_open(), now, now));
+            entry
+                .lids
+                .values()
+                .filter(|(lid, _, heard)| lid.is_some() && heard.elapsed() < ADVERT_TIMEOUT)
+                .max_by_key(|(_, said, _)| *said)
+                .and_then(|(lid, _, _)| *lid)
+                .unwrap_or(false)
+        };
+        // Opens only nearby; once open, only a closed lid (or silence) ends it,
+        // so the signal strength wobbling around the threshold doesn't
+        let open = lid && (was_open || strong);
         debug!(
             "Advert {}: lid {:02x} status {:02x} connection {:02x} rssi {:?} -> open {} | L {:?} R {:?} C {:?}",
             address, advert.lid, advert.status, advert.connection, advert.rssi, open,
             advert.left, advert.right, advert.case
         );
-        let connected = {
-            let mut devices = self.0.devices.lock().await;
-            let Some(entry) = devices.get_mut(address) else {
-                return;
-            };
-            entry.last_advert = Some(std::time::Instant::now());
-            entry.state.connected
-        };
+        let connected = self.state(address).await.is_some_and(|s| s.connected);
         let reading = |p: Option<(i32, bool)>| {
             p.map(|(l, c)| crate::state::Battery::reading(l, c))
                 .unwrap_or_default()
@@ -223,8 +238,28 @@ impl Hub {
         }
     }
 
-    pub async fn on_advert_lost(&self, address: &str) {
-        self.update(address, |s| s.case_open = false).await;
+    /// A sign of a bud without a new advert (its signal strength changed)
+    pub async fn on_advert_seen(&self, address: &str, source: bluer::Address) {
+        if let Some(entry) = self.0.devices.lock().await.get_mut(address)
+            && let Some(lid) = entry.lids.get_mut(&source)
+        {
+            lid.2 = std::time::Instant::now();
+        }
+    }
+
+    /// One bud's adverts stopped: the case is gone once no bud is heard
+    pub async fn on_advert_lost(&self, address: &str, source: bluer::Address) {
+        let gone = {
+            let mut devices = self.0.devices.lock().await;
+            let Some(entry) = devices.get_mut(address) else {
+                return;
+            };
+            entry.lids.remove(&source);
+            entry.lids.values().all(|(_, _, heard)| heard.elapsed() > ADVERT_TIMEOUT)
+        };
+        if gone {
+            self.update(address, |s| s.case_open = false).await;
+        }
     }
 
     /// Ends CaseOpen once adverts stop.
@@ -239,7 +274,7 @@ impl Hub {
                         .iter()
                         .filter(|(_, e)| {
                             e.state.case_open
-                                && e.last_advert.is_none_or(|t| t.elapsed() > ADVERT_TIMEOUT)
+                                && e.lids.values().all(|(_, _, heard)| heard.elapsed() > ADVERT_TIMEOUT)
                         })
                         .map(|(a, _)| a.clone())
                         .collect()

@@ -39,6 +39,8 @@ fn verify_rpa(addr: &Address, irk: &[u8; 16]) -> bool {
 /// One proximity advert, decoded.
 #[derive(Debug, Clone)]
 pub struct Advert {
+    /// Which bud sent it (each advertises from its own random address)
+    pub source: Address,
     /// Byte 8: lid state (see `lid_open`)
     pub lid: u8,
     pub status: u8,
@@ -52,15 +54,24 @@ pub struct Advert {
 }
 
 impl Advert {
-    /// PROVISIONAL, to be checked against a real case: bit 3 of the lid byte
-    /// set while the lid is closed. The buds learn the lid's state from the case,
-    /// so it only means something while the advertising bud is in it (status bit
-    /// 6); with both buds in ears the byte read "open" (0x12).
-    pub fn lid_open(&self) -> bool {
-        self.status & 0x40 != 0 && self.lid & 0x08 == 0
+    /// The advertising bud is in the case. Status bits, as seen on AirPods
+    /// Pro 3 (each bud advertises, alternately): 0x04 this bud in the case,
+    /// 0x10 the other one; 0x02 / 0x08 the same for ears; 0x20 / 0x40 tell the
+    /// buds apart. In ears 0x2b; both in the open case 0x55 / 0x35; one taken
+    /// out: the one left in 0x25, the one out 0x11.
+    pub fn in_case(&self) -> bool {
+        self.status & 0x04 != 0
     }
 
-    fn parse(apple: &[u8], enc_key: Option<&[u8; 16]>, rssi: Option<i16>) -> Option<Advert> {
+    /// The lid's state, known only while a bud is in the case (in ears the lid
+    /// byte read 0x12, "open"): bit 3 of the lid byte is set while it's closed
+    /// (open 0x33 -> closed 0x3b, open 0x31 -> closed 0x39; the low bits count
+    /// openings). None: no bud in the case, so unknown.
+    pub fn lid_open(&self) -> Option<bool> {
+        self.in_case().then_some(self.lid & 0x08 == 0)
+    }
+
+    fn parse(source: Address, apple: &[u8], enc_key: Option<&[u8; 16]>, rssi: Option<i16>) -> Option<Advert> {
         // [0] type 0x07, [1] length, [2] prefix, [3..5] model, [5] status,
         // [6] buds battery (rough), [7] charging flags + case battery (rough),
         // [8] lid, [9] color, [10] connection state, [11..27] encrypted
@@ -81,6 +92,7 @@ impl Advert {
             case = part(d[3]);
         }
         Some(Advert {
+            source,
             lid: apple[8],
             status,
             connection: apple[10],
@@ -178,7 +190,7 @@ pub async fn start_le_monitor(hub: Hub) -> bluer::Result<()> {
                     let mut rssi = dev.rssi().await.ok().flatten();
                     let handle = |data: &HashMap<u16, Vec<u8>>, rssi: Option<i16>| {
                         data.get(&0x004C)
-                            .and_then(|apple| Advert::parse(apple, enc_key.as_ref(), rssi))
+                            .and_then(|apple| Advert::parse(addr, apple, enc_key.as_ref(), rssi))
                     };
                     if let Ok(Some(data)) = dev.manufacturer_data().await
                         && let Some(advert) = handle(&data, rssi)
@@ -190,7 +202,13 @@ pub async fn start_le_monitor(hub: Hub) -> bluer::Result<()> {
                     };
                     while let Some(bluer::DeviceEvent::PropertyChanged(prop)) = events.next().await {
                         match prop {
-                            bluer::DeviceProperty::Rssi(r) => rssi = Some(r),
+                            // BlueZ reports an advert only when its content changes,
+                            // so with the lid open and nothing changing, the signal
+                            // strength is the sign the case is still there
+                            bluer::DeviceProperty::Rssi(r) => {
+                                rssi = Some(r);
+                                hub.on_advert_seen(&mac, addr).await;
+                            }
                             bluer::DeviceProperty::ManufacturerData(data) => {
                                 if let Some(advert) = handle(&data, rssi) {
                                     hub.on_advert(&mac, advert).await;
@@ -203,8 +221,8 @@ pub async fn start_le_monitor(hub: Hub) -> bluer::Result<()> {
             }
             MonitorEvent::DeviceLost(id) => {
                 if let Some(mac) = resolved.get(&id.device) {
-                    debug!("Adverts from {} stopped", mac);
-                    hub.on_advert_lost(mac).await;
+                    debug!("Adverts from {} ({}) stopped", mac, id.device);
+                    hub.on_advert_lost(mac, id.device).await;
                 }
             }
             _ => {}

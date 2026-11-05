@@ -25,7 +25,7 @@ PipeWire + WirePlumber.
 | D-Bus API, `podsctl`, `watch` stream | works |
 | Changing listening mode / settings | works (checked by reading the settings back after reconnecting; the AirPods ignore mode changes while both are in the case) |
 | Pause on removal, Conversation Awareness volume, takeover | LibrePods' logic, not yet re-tested here |
-| BLE adverts (`bleMonitor`): battery while connected elsewhere, `CaseOpen` | adverts received and decrypted (battery matches); the lid bits are still being confirmed |
+| BLE adverts (`bleMonitor`): battery while connected elsewhere, `CaseOpen` | works (lid and in-case bits worked out from a test with AirPods Pro 3) |
 
 ## Install
 
