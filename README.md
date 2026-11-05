@@ -45,7 +45,7 @@ Logs: `journalctl --user -u podsd`. `podsd --debug` also logs raw packets.
 ```
 podsctl status [--json]          state of every known pair
 podsctl watch                    JSON lines: the state now, then on every change
-podsctl mode <off|anc|transparency|adaptive>
+podsctl mode <off|anc|adaptive|transparency>
 podsctl settings [--json]        every setting, its value and what it accepts
 podsctl set <key> <value>        e.g. podsctl set conversation-awareness on
 podsctl connect | disconnect
@@ -100,7 +100,7 @@ Session bus, service `io.github.madeitdisfar.Podsd`.
 | `BatterySource` | s | `aacp`, `ble` (from adverts, while connected elsewhere) or `""` |
 | `EarPrimary`, `EarSecondary` | s | see above |
 | `InEar` | b | at least one bud in an ear |
-| `ListeningMode` | s | `off`, `noise-cancellation`, `transparency`, `adaptive` |
+| `ListeningMode` | s | `off`, `noise-cancellation`, `adaptive`, `transparency` |
 | `OwnsAudio` | b | this computer has the AirPods' audio (not the phone) |
 | `Settings` | a{sv} | every setting the AirPods reported, by key |
 

@@ -43,11 +43,12 @@ pub struct SettingDef {
     pub label: &'static str,
 }
 
+/// In iOS's order.
 pub const LISTENING_MODES: &[(u8, &str)] = &[
     (0x01, "off"),
     (0x02, "noise-cancellation"),
-    (0x03, "transparency"),
     (0x04, "adaptive"),
+    (0x03, "transparency"),
 ];
 
 const SPEEDS: &[(u8, &str)] = &[(0x00, "default"), (0x01, "slower"), (0x02, "slowest")];

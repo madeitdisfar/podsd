@@ -243,6 +243,7 @@ async fn handle_event(
                 s.firmware = info.version1.clone();
             })
             .await;
+            hub.sync_alias(address, &info.name, false).await;
         }
         AACPEvent::ConnectedDevices(old_devices, new_devices) => {
             let local_mac = hub.local_mac().to_string();

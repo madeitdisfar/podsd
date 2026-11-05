@@ -46,7 +46,7 @@ enum Command {
     },
     /// Print the state as JSON lines, again on every change.
     Watch,
-    /// Set the listening mode: off, anc (noise-cancellation), transparency, adaptive.
+    /// Set the listening mode: off, anc (noise-cancellation), adaptive, transparency.
     Mode { mode: String },
     /// List the settings with their current values.
     Settings {

@@ -238,6 +238,7 @@ impl DeviceIface {
         aacp.send_rename_packet(&name)
             .await
             .map_err(|e| fdo::Error::Failed(format!("Rename failed: {e}")))?;
+        self.hub.sync_alias(&self.address, &name, true).await;
         self.hub.update(&self.address, |s| s.name = name).await;
         Ok(())
     }

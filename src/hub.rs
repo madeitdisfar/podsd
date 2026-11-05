@@ -107,6 +107,53 @@ impl Hub {
         }
     }
 
+    /// Shows the AirPods' own name in BlueZ (and so in every Bluetooth list and
+    /// PipeWire's device name): over classic Bluetooth they call themselves
+    /// "<name> - Find My". Only while the alias was never set by hand (it equals
+    /// BlueZ's Name), or when `force` (a rename through podsd).
+    pub async fn sync_alias(&self, address: &str, name: &str, force: bool) {
+        let Some(path) = self.bluez_path(address).await else {
+            return;
+        };
+        let system = &self.0.system;
+        let get = |prop: &'static str| {
+            let path = path.clone();
+            async move {
+                system
+                    .call_method(
+                        Some("org.bluez"),
+                        path.as_str(),
+                        Some("org.freedesktop.DBus.Properties"),
+                        "Get",
+                        &("org.bluez.Device1", prop),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|reply| reply.body().deserialize::<zbus::zvariant::OwnedValue>().ok())
+                    .and_then(|v| v.downcast_ref::<&str>().ok().map(|s| s.to_string()))
+            }
+        };
+        let (Some(bluez_name), Some(alias)) = (get("Name").await, get("Alias").await) else {
+            return;
+        };
+        if name.is_empty() || alias == name || (!force && alias != bluez_name) {
+            return;
+        }
+        info!("{}: Bluetooth alias {:?} -> {:?}", address, alias, name);
+        if let Err(e) = system
+            .call_method(
+                Some("org.bluez"),
+                path.as_str(),
+                Some("org.freedesktop.DBus.Properties"),
+                "Set",
+                &("org.bluez.Device1", "Alias", Value::from(name)),
+            )
+            .await
+        {
+            warn!("Failed to set the alias of {}: {}", address, e);
+        }
+    }
+
     pub async fn has_device(&self, address: &str) -> bool {
         self.0.devices.lock().await.contains_key(address)
     }
