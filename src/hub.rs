@@ -46,12 +46,16 @@ struct Entry {
     attaching: bool,
     /// Per advertising bud: its last lid byte and when it was last heard
     lids: HashMap<bluer::Address, (u8, std::time::Instant)>,
+    /// The lid is open, from the last change in a bud's lid byte
+    lid_open: bool,
+    /// While open: an advert was strong enough (caseOpenRssi) to count as near
+    near: bool,
 }
 
-/// BlueZ passes an advert on only when it changes, so an open lid can be quiet
-/// for a while; a closing lid sends its own advert. This long without any sign
-/// of the case (advert or signal strength change), it went out of range.
-const ADVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// BlueZ passes an advert on only when it changes, so an open lid that nothing
+/// happens to can be quiet for a minute (41 s seen); closing it sends its own
+/// advert. This long without any sign of the case, it went out of range.
+const ADVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[derive(Clone)]
 pub struct Hub(Arc<Inner>);
@@ -105,6 +109,8 @@ impl Hub {
                     session: None,
                     attaching: false,
                     lids: HashMap::new(),
+                    lid_open: false,
+                    near: false,
                 },
             );
             // The case's last reading, from an earlier run
@@ -177,11 +183,13 @@ impl Hub {
     pub async fn on_advert(&self, address: &str, advert: crate::bluetooth::le::Advert) {
         let config = &self.0.config;
         let strong = advert.rssi.is_none_or(|r| r >= config.case_open_rssi);
-        let was_open = self.state(address).await.is_some_and(|s| s.case_open);
         // Both buds advertise, alternately, and a bud outside the case keeps
         // repeating a stale lid byte: only a change in a bud's lid byte is news
-        // about the lid, and only while a bud is in the case
-        let news = {
+        // about the lid, and only while a bud is in the case. Nearness is apart:
+        // the first advert after opening can be weak, and later ones only repeat
+        // it. Once near, it stays near until the lid closes, so the signal
+        // strength wobbling around the threshold doesn't close the card.
+        let (news, open) = {
             let mut devices = self.0.devices.lock().await;
             let Some(entry) = devices.get_mut(address) else {
                 return;
@@ -190,14 +198,12 @@ impl Hub {
                 .lids
                 .insert(advert.source, (advert.lid, std::time::Instant::now()))
                 .map(|(lid, _)| lid);
-            (previous != Some(advert.lid) && advert.in_case()).then(|| advert.lid_open())
-        };
-        // Opens only nearby; once open, only a closed lid (or silence) ends it,
-        // so the signal strength wobbling around the threshold doesn't
-        let open = match news {
-            Some(true) => was_open || strong,
-            Some(false) => false,
-            None => was_open,
+            let news = (previous != Some(advert.lid) && advert.in_case()).then(|| advert.lid_open());
+            if let Some(open) = news {
+                entry.lid_open = open;
+            }
+            entry.near = entry.lid_open && (entry.near || strong);
+            (news, entry.lid_open && entry.near)
         };
         debug!(
             "Advert {} from {}: lid {:02x} status {:02x} connection {:02x} rssi {:?} news {:?} -> open {} | L {:?} R {:?} C {:?}",
@@ -259,8 +265,16 @@ impl Hub {
             entry.lids.values().all(|(_, heard)| heard.elapsed() > ADVERT_TIMEOUT)
         };
         if gone {
-            self.update(address, |s| s.case_open = false).await;
+            self.close_lid(address).await;
         }
+    }
+
+    async fn close_lid(&self, address: &str) {
+        if let Some(entry) = self.0.devices.lock().await.get_mut(address) {
+            entry.lid_open = false;
+            entry.near = false;
+        }
+        self.update(address, |s| s.case_open = false).await;
     }
 
     /// Ends CaseOpen once adverts stop.
@@ -274,14 +288,14 @@ impl Hub {
                     devices
                         .iter()
                         .filter(|(_, e)| {
-                            e.state.case_open
+                            e.lid_open
                                 && e.lids.values().all(|(_, heard)| heard.elapsed() > ADVERT_TIMEOUT)
                         })
                         .map(|(a, _)| a.clone())
                         .collect()
                 };
                 for address in stale {
-                    hub.update(&address, |s| s.case_open = false).await;
+                    hub.close_lid(&address).await;
                 }
             }
         });
