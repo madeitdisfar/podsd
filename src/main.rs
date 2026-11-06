@@ -161,6 +161,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tokio::spawn(watch_bluez(hub.clone()));
+    tokio::spawn(log_disconnect_reasons(hub.clone()));
     hub.start_advert_timeout();
 
     if config.ble_monitor {
@@ -230,6 +231,44 @@ async fn run_le_monitor(hub: Hub, system: Connection) {
         monitor.abort();
         // Give bluetoothd a moment to set the adapter up
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+/// Logs why AirPods disconnected (BlueZ's Device1.Disconnected: the reason,
+/// such as org.bluez.Reason.Remote or .Timeout, and a message)
+async fn log_disconnect_reasons(hub: Hub) {
+    let system = hub.system().clone();
+    let rule = async {
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender("org.bluez")?
+            .interface("org.bluez.Device1")?
+            .member("Disconnected")?
+            .path_namespace("/org/bluez")?
+            .build();
+        MessageStream::for_match_rule(rule, &system, None).await
+    }
+    .await;
+    let mut stream = match rule {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("Can't follow disconnect reasons: {}", e);
+            return;
+        }
+    };
+    while let Some(Ok(msg)) = stream.next().await {
+        let header = msg.header();
+        let Some(path) = header.path() else { continue };
+        // /org/bluez/hci0/dev_20_52_1D_6F_70_76
+        let Some(address) = path.as_str().rsplit('/').next().and_then(|d| d.strip_prefix("dev_")) else {
+            continue;
+        };
+        let address = address.replace('_', ":");
+        if !hub.has_device(&address).await {
+            continue;
+        }
+        let (reason, message) = msg.body().deserialize::<(String, String)>().unwrap_or_default();
+        info!("{} disconnected: {} ({})", address, reason, message);
     }
 }
 
