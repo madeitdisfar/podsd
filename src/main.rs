@@ -10,6 +10,7 @@ mod hub;
 mod media_controller;
 mod settings;
 mod state;
+mod switching;
 mod utils;
 
 use crate::api::{BUS_NAME, ROOT_PATH};
@@ -96,7 +97,21 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         })
         .ok_or("No Bluetooth adapter found")?;
 
-    let hub = Hub::new(session.clone(), system.clone(), config.clone(), local_mac);
+    // Apple's Device ID (DeviceID = bluetooth:004C:… in /etc/bluetooth/main.conf)
+    let apple_id = objects
+        .values()
+        .find_map(|ifaces| {
+            ifaces
+                .iter()
+                .find(|(name, _)| name.as_str() == "org.bluez.Adapter1")
+                .and_then(|(_, props)| prop_str(props, "Modalias"))
+        })
+        .is_some_and(|m| m.to_ascii_lowercase().starts_with("bluetooth:v004c"));
+    info!(
+        "Device ID: {}",
+        if apple_id { "Apple's: automatic switching with Apple devices" } else { "not Apple's: no automatic switching" }
+    );
+    let hub = Hub::new(session.clone(), system.clone(), config.clone(), local_mac, apple_id);
 
     session.object_server().at(ROOT_PATH, ObjectManager).await?;
     session.object_server().at(ROOT_PATH, ManagerIface).await?;

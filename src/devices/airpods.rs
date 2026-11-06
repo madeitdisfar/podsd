@@ -7,6 +7,7 @@ use crate::bluetooth::aacp::{
     StemPressType,
 };
 use crate::hub::{Hub, Session};
+use crate::switching::Switcher;
 use crate::media_controller::MediaController;
 use crate::settings;
 use crate::settings::LISTENING_MODES;
@@ -143,17 +144,19 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
         }));
     }
 
-    if config.takeover_on_play {
-        media
-            .start_playback_listener(aacp.clone(), command_tx.clone())
-            .await;
-    }
+    // Moving the AirPods between this computer and another device. Its loop
+    // always runs (it tells the other device when playback here starts and
+    // stops); it takes them over by itself only with takeoverOnPlay and Apple's
+    // Device ID.
+    let switcher = Switcher::new(hub.clone(), address.clone(), aacp.clone(), media.clone());
+    tasks.push(tokio::spawn(switcher.clone().run(config.takeover_on_play, hub.apple_id())));
 
     {
         let hub = hub.clone();
         let aacp = aacp.clone();
         let media = media.clone();
         let address = address.clone();
+        let switcher = switcher.clone();
         tasks.push(tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 if let AACPEvent::Disconnected = event {
@@ -163,12 +166,13 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
                     tokio::spawn(async move { hub.on_channel_closed(&address).await });
                     break;
                 }
-                handle_event(&hub, &aacp, &media, &address, &command_tx, event).await;
+                handle_event(&hub, &aacp, &media, &switcher, &address, event).await;
             }
         }));
     }
 
-    Some(Session { aacp, media, tasks })
+    drop(command_tx);
+    Some(Session { aacp, media, switcher: Some(switcher), tasks })
 }
 
 fn ear_name(status: &EarDetectionStatus) -> &'static str {
@@ -184,8 +188,8 @@ async fn handle_event(
     hub: &Hub,
     aacp: &AACPManager,
     media: &MediaController,
+    switcher: &Switcher,
     address: &str,
-    command_tx: &tokio::sync::mpsc::UnboundedSender<(ControlCommandIdentifiers, Vec<u8>)>,
     event: AACPEvent,
 ) {
     let config = hub.config();
@@ -240,10 +244,8 @@ async fn handle_event(
                 }
             })
             .await;
-            if owns == Some(false) {
-                info!("Lost ownership, pausing media and disconnecting audio");
-                media.pause_all_media().await;
-                media.deactivate_a2dp_profile().await;
+            if let Some(owns) = owns {
+                switcher.on_ownership(owns).await;
             }
         }
         AACPEvent::EarDetection(old, new) => {
@@ -294,11 +296,14 @@ async fn handle_event(
                 });
             }
         }
-        AACPEvent::OwnershipToFalseRequest => {
-            info!("Asked to give up ownership: pausing media");
-            let _ = command_tx.send((ControlCommandIdentifiers::OwnsConnection, vec![0x00]));
-            media.pause_all_media().await;
-            media.deactivate_a2dp_profile().await;
+        AACPEvent::OwnershipToFalseRequest { sender, reversed } => {
+            switcher.on_taken(&sender, reversed).await;
+        }
+        AACPEvent::ShowNearbyUI { sender } => {
+            switcher.on_show_nearby(&sender).await;
+        }
+        AACPEvent::AudioSource(source) => {
+            switcher.on_audio_source(&source.mac, source.r#type).await;
         }
         AACPEvent::StemPress(press, bud) => {
             let press_name = match press {

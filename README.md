@@ -31,7 +31,7 @@ PipeWire + WirePlumber.
 | Battery while connected elsewhere | From BLE adverts, decrypted with the pair's key |
 | Pause / resume media when a bud comes out / goes back | `earPause`; LibrePods' logic |
 | Lower the volume while you speak (Conversation Awareness) | `conversationVolume`; LibrePods' logic |
-| Take the AirPods over from a phone when media plays here | `takeoverOnPlay`; LibrePods' logic |
+| Switching with an Apple device: shared connection, automatic takeover on playback, Move back | Needs Apple's Device ID; see [Switching between devices](#switching-between-devices) |
 | Stem presses: play / pause, next, previous | The AirPods do it themselves over AVRCP, given `mpris-proxy` (see Install). `stemControl` instead has them report double / triple presses to podsd (`StemPress` signal), which skips tracks itself |
 | Keep the audio codec | Turns a switched-off audio profile back on, preferring AAC |
 
@@ -68,7 +68,6 @@ of working out its encoding.
 | Heart rate | Control command `0x30` (reported); LibrePods has it as experimental |
 | Fit test (Acoustic Seal) | Not implemented |
 | High-quality two-way audio (microphone) | Work in progress in LibrePods (PRs #655, #888) |
-| Automatic switching like between Apple devices | Partly: `takeoverOnPlay` takes them over when media plays here |
 
 ## Install
 
@@ -97,6 +96,7 @@ podsctl settings [--json]        every setting, its value and what it accepts
 podsctl set <key> <value>        e.g. podsctl set conversation-awareness on
 podsctl connect | disconnect
 podsctl rename <name>
+podsctl move-here               take the AirPods over from the other device
 ```
 
 `-d <address or name>` picks the AirPods; the default is the connected pair.
@@ -151,6 +151,7 @@ Session bus, service `io.github.madeitdisfar.Podsd`.
 | `InEar` | b | at least one bud in an ear |
 | `ListeningMode` | s | `off`, `transparency`, `adaptive`, `noise-cancellation` |
 | `ListeningModes` | as | the modes `SetListeningMode` takes now: Off only with `allow-off-mode`; with one bud in an ear, noise cancellation and Adaptive only with `one-bud-anc` (as on iOS) |
+| `OtherDevice` | s | the other device sharing the AirPods (`iPhone`, `iPad`, `Mac`, `another device`), `""` when none |
 | `OwnsAudio` | b | this computer has the AirPods' audio (not the phone) |
 | `Settings` | a{sv} | every setting the AirPods reported, by key |
 
@@ -165,6 +166,11 @@ when the AirPods apply it:
 | `Rename(s name)` | |
 | `Refresh()` | asks the AirPods to report their settings again (podsd also does this once by itself when they haven't 3 s after connecting). Right after a switch from another device, AirPods Pro 3 report nothing for about 30 s whatever is sent; `ListeningMode` is `""` meanwhile |
 | `Connect()`, `Disconnect()` | through BlueZ |
+| `MoveHere()` | takes the AirPods over from the other device (see [Switching between devices](#switching-between-devices)) |
+
+Signal `MovedTo(s name, b reversed)`: another device took the AirPods; `reversed` when its
+user moved them back from this computer ("Move back" on its notice). Clients show a notice
+with Move back (`MoveHere`).
 
 Signal `StemPress(s press, s bud)`: press `single`/`double`/`triple`/`long`, bud
 `left`/`right`. The AirPods report presses only when asked to (`stemControl` in the config).
@@ -206,6 +212,28 @@ Encodings follow LibrePods' Android app. Adding one
 is an entry in [`src/settings.rs`](src/settings.rs); clients pick it up from
 `DescribeSettings`.
 
+## Switching between devices
+
+With Apple's Device ID on this computer (`DeviceID = bluetooth:004C:0000:0000` under
+`[General]` in `/etc/bluetooth/main.conf`), the AirPods stay connected to this computer and
+an Apple device (an iPhone) at once, and one of them at a time owns the audio, as between
+Apple devices. Without it they drop the other device when this computer connects.
+
+podsd follows LibrePods' Android app here:
+
+- **Taking over**: when audio starts playing here (a real playback stream; a player that only
+  reports Playing, like Spotify Connect playing on the phone, doesn't count) with an AirPod in
+  an ear, podsd claims the audio, tells the other device through the AirPods (smart routing:
+  media information, its "moved" UI, a hijack request), turns the audio profile on, and
+  resumes playback, which the AirPods pause while switching. Automatic only with
+  `takeoverOnPlay` and Apple's Device ID; `MoveHere()` does it by hand either way.
+- **Losing them**: when the other device takes them, podsd pauses media here, turns the audio
+  profile off (so sound doesn't go to AirPods in use elsewhere) and emits `MovedTo`. It doesn't
+  take them back by itself for 3 s, and not at all after the other device's user tapped "Move
+  back", until `MoveHere()`.
+- podsd tells the other device whenever playback here starts or stops, and gives up the
+  audio when the AirPods report the other device playing.
+
 ## Config
 
 `~/.config/podsd/config.json`, read at start (`systemctl --user restart podsd` after a change).
@@ -229,7 +257,7 @@ Every key is optional:
 |---|---|
 | `earPause` | pause media when an AirPod comes out, resume when it goes back |
 | `disconnectWhenNotWearing` | switch the AirPods' audio profile off while neither is worn |
-| `takeoverOnPlay` | when media starts here with an AirPod in, take the AirPods from the phone |
+| `takeoverOnPlay` | when audio starts playing here with an AirPod in, take the AirPods over from the other device (needs Apple's Device ID; see [Switching between devices](#switching-between-devices)) |
 | `conversationVolume` | lower the volume while Conversation Awareness hears you speak |
 | `stemControl` | double press: next track, triple press: previous track |
 | `restartWireplumber` | restart WirePlumber when the AirPods have no A2DP profile (cuts all audio for a moment) |

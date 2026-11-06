@@ -24,6 +24,7 @@ use zbus::zvariant::Value;
 pub struct Session {
     pub aacp: AACPManager,
     pub media: MediaController,
+    pub switcher: Option<crate::switching::Switcher>,
     pub tasks: Vec<JoinHandle<()>>,
 }
 
@@ -65,22 +66,57 @@ struct Inner {
     system: Connection,
     config: Config,
     local_mac: String,
+    /// The adapter shows Apple's Device ID (bluetooth:v004C…): the AirPods then
+    /// share themselves with an Apple device instead of dropping it
+    apple_id: bool,
     devices: Mutex<HashMap<String, Entry>>,
 }
 
 impl Hub {
-    pub fn new(conn: Connection, system: Connection, config: Config, local_mac: String) -> Self {
+    pub fn new(conn: Connection, system: Connection, config: Config, local_mac: String, apple_id: bool) -> Self {
         Hub(Arc::new(Inner {
             conn,
             system,
             config,
             local_mac,
+            apple_id,
             devices: Mutex::new(HashMap::new()),
         }))
     }
 
     pub fn config(&self) -> &Config {
         &self.0.config
+    }
+
+    pub fn apple_id(&self) -> bool {
+        self.0.apple_id
+    }
+
+    /// Takes the AirPods over by hand (Move back, "Use here")
+    pub async fn move_here(&self, address: &str) -> bool {
+        let switcher = {
+            let devices = self.0.devices.lock().await;
+            devices
+                .get(address)
+                .and_then(|e| e.session.as_ref())
+                .and_then(|s| s.switcher.clone())
+        };
+        match switcher {
+            Some(s) => {
+                s.take_over(true).await;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub async fn emit_moved_to(&self, address: &str, name: &str, reversed: bool) {
+        let path = device_path(address);
+        if let Ok(emitter) = SignalEmitter::new(&self.0.conn, path.as_str())
+            && let Err(e) = DeviceIface::moved_to(&emitter, name, reversed).await
+        {
+            warn!("Failed to emit MovedTo: {}", e);
+        }
     }
 
     pub fn local_mac(&self) -> &str {

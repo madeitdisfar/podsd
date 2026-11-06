@@ -1,4 +1,3 @@
-use crate::bluetooth::aacp::AACPManager;
 use crate::bluetooth::aacp::EarDetectionStatus;
 use dbus::arg::RefArg;
 use dbus::blocking::Connection;
@@ -53,7 +52,6 @@ struct MediaControllerState {
     disconnect_when_not_wearing: bool,
     conv_original_volume: Option<u32>,
     conv_conversation_started: bool,
-    playback_listener_running: bool,
     restart_wireplumber: bool,
 }
 
@@ -73,7 +71,6 @@ impl MediaControllerState {
             disconnect_when_not_wearing: false,
             conv_original_volume: None,
             conv_conversation_started: false,
-            playback_listener_running: false,
             restart_wireplumber: false,
         }
     }
@@ -100,126 +97,9 @@ impl MediaController {
         state.restart_wireplumber = restart_wireplumber;
     }
 
-    /// Ends the playback listener at its next poll.
-    pub async fn stop(&self) {
-        self.state.lock().await.playback_listener_running = false;
-    }
-
-    pub async fn start_playback_listener(
-        &self,
-        aacp_manager: AACPManager,
-        control_tx: tokio::sync::mpsc::UnboundedSender<(
-            crate::bluetooth::aacp::ControlCommandIdentifiers,
-            Vec<u8>,
-        )>,
-    ) {
-        let mut state = self.state.lock().await;
-        if state.playback_listener_running {
-            debug!("Playback listener already running");
-            return;
-        }
-        state.playback_listener_running = true;
-        drop(state);
-
-        let controller_clone = self.clone();
-        tokio::spawn(async move {
-            controller_clone
-                .playback_listener_loop(aacp_manager, control_tx)
-                .await;
-        });
-    }
-
-    async fn playback_listener_loop(
-        &self,
-        aacp_manager: AACPManager,
-        control_tx: tokio::sync::mpsc::UnboundedSender<(
-            crate::bluetooth::aacp::ControlCommandIdentifiers,
-            Vec<u8>,
-        )>,
-    ) {
-        info!("Starting playback listener loop");
-        loop {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if !self.state.lock().await.playback_listener_running {
-                info!("Playback listener stopped");
-                return;
-            }
-
-            let is_playing = tokio::task::spawn_blocking(|| Self::check_if_playing())
-                .await
-                .unwrap_or(false);
-
-            let mut state = self.state.lock().await;
-            let was_playing = state.is_playing;
-            state.is_playing = is_playing;
-            let local_mac = state.local_mac.clone();
-            drop(state);
-
-            if !was_playing && is_playing {
-                // Copy what is needed and release the lock: the send_* calls below
-                // lock the same state, so holding it here would deadlock the
-                // connection as soon as another device is connected.
-                // (librepods PR #896 by smoothxhale)
-                let (in_ear, connected_devices) = {
-                    let aacp_state = aacp_manager.state.lock().await;
-                    (
-                        aacp_state
-                            .ear_detection_status
-                            .contains(&EarDetectionStatus::InEar),
-                        aacp_state.connected_devices.clone(),
-                    )
-                };
-                if !in_ear {
-                    info!("Media playback started but buds not in ear, skipping takeover");
-                    continue;
-                }
-                info!("Media playback started, taking ownership and activating a2dp");
-                let _ = control_tx.send((
-                    crate::bluetooth::aacp::ControlCommandIdentifiers::OwnsConnection,
-                    vec![0x01],
-                ));
-                self.activate_a2dp_profile().await;
-
-                info!("already connected locally, hijacking connection by asking AirPods");
-
-                for device in connected_devices {
-                    if device.mac != local_mac {
-                        if let Err(e) = aacp_manager
-                            .send_media_information(&local_mac, &device.mac, true)
-                            .await
-                        {
-                            error!("Failed to send media information to {}: {}", device.mac, e);
-                        }
-                        if let Err(e) = aacp_manager.send_smart_routing_show_ui(&device.mac).await {
-                            error!(
-                                "Failed to send smart routing show ui to {}: {}",
-                                device.mac, e
-                            );
-                        }
-                        if let Err(e) = aacp_manager.send_hijack_request(&device.mac).await {
-                            error!("Failed to send hijack request to {}: {}", device.mac, e);
-                        }
-                    }
-                }
-
-                debug!("completed playback takeover process");
-            }
-        }
-    }
-
-    fn check_if_playing() -> bool {
-        let conn = match Connection::new_session() {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        Self::list_mpris_services(&conn).iter().any(|service| {
-            let proxy = conn.with_proxy(service, "/org/mpris/MediaPlayer2", Duration::from_secs(5));
-            proxy
-                .get::<String>("org.mpris.MediaPlayer2.Player", "PlaybackStatus")
-                .map(|s| s == "Playing")
-                .unwrap_or(false)
-        })
-    }
+    /// Nothing to stop now that the switching loop lives in switching.rs; kept
+    /// so a session's shutdown reads the same.
+    pub async fn stop(&self) {}
 
     fn is_kdeconnect_service(service: &str) -> bool {
         service.starts_with("org.mpris.MediaPlayer2.kdeconnect.mpris_")
@@ -1008,6 +888,75 @@ fn get_card_info_list_sync() -> Vec<OwnedCardInfo> {
     }
     mainloop.quit(Retval(0));
     Rc::try_unwrap(cards).unwrap().into_inner()
+}
+
+/// Whether an app here is playing audio now: an unpaused playback stream
+/// (PulseAudio sink input), not counting system sounds, notifications or
+/// accessibility. A player that only reports "Playing" over MPRIS (Spotify
+/// Connect playing on a phone) has no stream, so it doesn't count. LibrePods'
+/// Android app likewise looks at the audio actually playing (music or movie).
+pub fn local_audio_active_sync() -> bool {
+    let (mut mainloop, context) = match pulse_connect() {
+        Some(c) => c,
+        None => return false,
+    };
+    let active = Rc::new(RefCell::new(false));
+    let op = context.introspect().get_sink_input_info_list({
+        let active = active.clone();
+        move |result| {
+            if let ListResult::Item(item) = result {
+                let role = item.proplist.get_str("media.role").unwrap_or_default();
+                let ignored = ["event", "notification", "a11y", "accessibility", "test"]
+                    .iter()
+                    .any(|r| role.eq_ignore_ascii_case(r));
+                if !item.corked && !ignored {
+                    *active.borrow_mut() = true;
+                }
+            }
+        }
+    });
+    while op.get_state() == OperationState::Running {
+        mainloop.iterate(false);
+    }
+    mainloop.quit(Retval(0));
+    let result = *active.borrow();
+    result
+}
+
+/// MPRIS players reporting Playing now (to resume them after a switch)
+pub fn playing_players_sync() -> Vec<String> {
+    let Ok(conn) = Connection::new_session() else {
+        return vec![];
+    };
+    MediaController::list_mpris_services(&conn)
+        .into_iter()
+        .filter(|service| {
+            conn.with_proxy(service, "/org/mpris/MediaPlayer2", Duration::from_secs(2))
+                .get::<String>("org.mpris.MediaPlayer2.Player", "PlaybackStatus")
+                .map(|s| s == "Playing")
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Plays those of these players that aren't playing now. The AirPods pause the
+/// audio while they switch, so playback is resumed after taking them over, as
+/// LibrePods' Android app does.
+pub fn resume_players_sync(players: &[String]) {
+    let Ok(conn) = Connection::new_session() else {
+        return;
+    };
+    for service in players {
+        let proxy = conn.with_proxy(service, "/org/mpris/MediaPlayer2", Duration::from_secs(2));
+        let playing = proxy
+            .get::<String>("org.mpris.MediaPlayer2.Player", "PlaybackStatus")
+            .map(|s| s == "Playing")
+            .unwrap_or(true);
+        if !playing {
+            let _ = proxy.method_call::<(), _, &str, &str>("org.mpris.MediaPlayer2.Player", "Play", ());
+            info!("Resumed {} after taking the AirPods over", service);
+        }
+    }
 }
 
 fn active_profile_sync(card_index: u32) -> Option<String> {

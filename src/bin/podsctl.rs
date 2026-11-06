@@ -14,6 +14,8 @@
 //! battery.case also has "live" (false: the last reading, kept while no bud is
 //! in the case) and "time" (when it was read, Unix seconds).
 //!   {"kind":"stemPress","address":"…","press":"double","bud":"left"}
+//!   {"kind":"movedTo","address":"…","name":"iPhone","reversed":false}
+//!     another device took the AirPods; reversed: its user moved them back
 //!
 //! A battery level is null when unknown. Exits when stdout closes.
 
@@ -66,6 +68,8 @@ enum Command {
     Disconnect,
     /// Rename the AirPods.
     Rename { name: String },
+    /// Take the AirPods over from the other device sharing them (an iPhone).
+    MoveHere,
 }
 
 type Props = HashMap<String, OwnedValue>;
@@ -142,6 +146,8 @@ fn device_json(props: &Props) -> Json {
         // the modes it can switch to now
         "listeningModes": get(props, "ListeningModes"),
         "ownsAudio": get(props, "OwnsAudio"),
+        // the other device sharing the AirPods ("iPhone", …), "" when none
+        "otherDevice": get(props, "OtherDevice"),
         "caseOpen": get(props, "CaseOpen"),
         "settings": get(props, "Settings"),
     })
@@ -230,6 +236,16 @@ async fn watch(conn: &Connection) -> zbus::Result<()> {
         }
         for msg in pending.into_iter().flatten() {
             let header = msg.header();
+            if header.member().map(|m| m.as_str()) == Some("MovedTo")
+                && let Ok((name, reversed)) = msg.body().deserialize::<(String, bool)>()
+            {
+                let path = header.path().map(|p| p.to_string()).unwrap_or_default();
+                let address = path.rsplit("/dev_").next().unwrap_or_default().replace('_', ":");
+                emit(
+                    &mut out,
+                    &json!({ "kind": "movedTo", "address": address, "name": name, "reversed": reversed }),
+                );
+            }
             if header.member().map(|m| m.as_str()) == Some("StemPress")
                 && let Ok((press, bud)) = msg.body().deserialize::<(String, String)>()
             {
@@ -394,6 +410,9 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Rename { name } => {
             call(&conn, path, "Rename", &(name,)).await?;
+        }
+        Command::MoveHere => {
+            call(&conn, path, "MoveHere", &()).await?;
         }
         Command::Status { .. } | Command::Watch => unreachable!(),
     }

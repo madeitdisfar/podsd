@@ -66,6 +66,9 @@ pub struct DeviceState {
     pub settings: BTreeMap<String, SettingValue>,
     /// The case's lid is open nearby (from BLE adverts)
     pub case_open: bool,
+    /// The other device sharing the AirPods ("iPhone", "iPad", "Mac", "another
+    /// device"), "" when none
+    pub other_device: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,6 +157,7 @@ impl DeviceState {
         self.ear_secondary.clear();
         self.listening_mode.clear();
         self.owns_audio = false;
+        self.other_device.clear();
         self.settings.clear();
     }
 
@@ -184,6 +188,7 @@ impl DeviceState {
             ("ListeningMode", Prop::S(self.listening_mode.clone())),
             ("ListeningModes", Prop::Strs(self.listening_modes())),
             ("OwnsAudio", Prop::B(self.owns_audio)),
+            ("OtherDevice", Prop::S(self.other_device.clone())),
             ("Settings", Prop::Settings(self.settings.clone())),
         ]
     }

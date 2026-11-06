@@ -181,6 +181,25 @@ impl DeviceIface {
     async fn owns_audio(&self) -> bool {
         self.st().await.owns_audio
     }
+    /// The other device sharing the AirPods ("iPhone", …), "" when none
+    #[zbus(property)]
+    async fn other_device(&self) -> String {
+        self.st().await.other_device
+    }
+
+    /// Takes the AirPods over from the other device (Move back, "Use here")
+    async fn move_here(&self) -> fdo::Result<()> {
+        if self.hub.move_here(&self.address).await {
+            Ok(())
+        } else {
+            Err(fdo::Error::Failed("AirPods are not connected".into()))
+        }
+    }
+
+    /// Another device took the AirPods: its name, and whether its user moved
+    /// them back from this computer ("Move back" on its notice)
+    #[zbus(signal)]
+    pub async fn moved_to(emitter: &SignalEmitter<'_>, name: &str, reversed: bool) -> zbus::Result<()>;
     #[zbus(property)]
     async fn settings(&self) -> HashMap<String, Value<'static>> {
         settings_dict(&self.st().await.settings)

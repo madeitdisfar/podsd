@@ -303,7 +303,11 @@ pub enum AACPEvent {
     ProximityKeys(Vec<(u8, Vec<u8>)>),
     AudioSource(AudioSource),
     ConnectedDevices(Vec<ConnectedDevice>, Vec<ConnectedDevice>),
-    OwnershipToFalseRequest,
+    /// Another device took the AirPods (smart routing "SetOwnershipToFalse"):
+    /// its address, and whether its user tapped "Move back" (ReverseBannerTapped)
+    OwnershipToFalseRequest { sender: String, reversed: bool },
+    /// Another device asks to show its "moved" UI (SmartRoutingKeyShowNearbyUI)
+    ShowNearbyUI { sender: String },
     StemPress(StemPressType, StemPressBudType),
     Information(AirPodsInformation),
     /// The control channel closed (AirPods gone, or the link dropped).
@@ -332,6 +336,9 @@ pub struct AACPManagerState {
     event_tx: Option<mpsc::UnboundedSender<AACPEvent>>,
     pub devices: HashMap<String, DeviceData>,
     pub airpods_mac: Option<Address>,
+    /// Other devices' kinds ("iPhone", "iPad", "Mac"), from their smart routing
+    /// messages, by address
+    pub device_types: HashMap<String, String>,
 }
 
 impl AACPManagerState {
@@ -352,6 +359,7 @@ impl AACPManagerState {
             event_tx: None,
             devices,
             airpods_mac: None,
+            device_types: HashMap::new(),
         }
     }
 }
@@ -961,11 +969,35 @@ impl AACPManager {
                 }
                 let packet_string = String::from_utf8_lossy(&payload[2..]);
                 info!("Received Smart Routing Response: {}", packet_string);
+                // The sender's address is at packet bytes 6..12, reversed (as
+                // LibrePods' Android app reads it)
+                if packet.len() < 12 {
+                    return;
+                }
+                let sender = packet[6..12]
+                    .iter()
+                    .rev()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(":");
+                let kind = ["iPad", "Mac", "iPhone"]
+                    .into_iter()
+                    .find(|k| packet_string.contains(k));
+                let mut state = self.state.lock().await;
+                if let Some(kind) = kind {
+                    state.device_types.insert(sender.clone(), kind.to_string());
+                }
                 if packet_string.contains("SetOwnershipToFalse") {
-                    info!("Received OwnershipToFalse request");
-                    if let Some(ref tx) = self.state.lock().await.event_tx {
-                        let _ = tx.send(AACPEvent::OwnershipToFalseRequest);
+                    let reversed = packet_string.contains("ReverseBannerTapped");
+                    info!("{} took the AirPods (move back tapped: {})", sender, reversed);
+                    if let Some(ref tx) = state.event_tx {
+                        let _ = tx.send(AACPEvent::OwnershipToFalseRequest { sender: sender.clone(), reversed });
                     }
+                }
+                if packet_string.contains("ShowNearbyUI")
+                    && let Some(ref tx) = state.event_tx
+                {
+                    let _ = tx.send(AACPEvent::ShowNearbyUI { sender });
                 }
             }
             opcodes::EQ_DATA => {
