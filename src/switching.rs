@@ -231,6 +231,12 @@ impl Switcher {
                 .aacp
                 .send_control_command(ControlCommandIdentifiers::OwnsConnection, &[0x00])
                 .await;
+            // The AirPods don't always send an ownership report then (right
+            // after connecting they hadn't), so take this as one: otherwise
+            // this computer kept the AirPods as its output and competed for
+            // the audio, and the phone's playback paused.
+            self.on_ownership(false).await;
+            return;
         }
         self.refresh_other().await;
     }
