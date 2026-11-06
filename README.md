@@ -32,7 +32,7 @@ PipeWire + WirePlumber.
 | Pause / resume media when a bud comes out / goes back | `earPause`; LibrePods' logic |
 | Lower the volume while you speak (Conversation Awareness) | `conversationVolume`; LibrePods' logic |
 | Take the AirPods over from a phone when media plays here | `takeoverOnPlay`; LibrePods' logic |
-| Stem presses | `StemPress` signal; double / triple press = next / previous track with `stemControl` |
+| Stem presses: play / pause, next, previous | The AirPods do it themselves over AVRCP, given `mpris-proxy` (see Install). `stemControl` instead has them report double / triple presses to podsd (`StemPress` signal), which skips tracks itself |
 | Keep the audio codec | Turns a switched-off audio profile back on, preferring AAC |
 
 LibrePods' logic in the last rows works but hasn't been re-tested in every case here.
@@ -74,6 +74,10 @@ of working out its encoding.
 
 Needs Rust, BlueZ, and PipeWire with its PulseAudio server (libpulse). Pair the AirPods with
 BlueZ first.
+
+`install.sh` also enables BlueZ's `mpris-proxy` (bluez-utils), which tells the AirPods what's
+playing here over AVRCP and passes their commands to the media player. Without it the AirPods
+send "play" for every stem press: double and triple press (next / previous track) do nothing.
 
 ```sh
 ./install.sh             # build, install to ~/.local/bin, enable the user service
