@@ -237,6 +237,15 @@ podsd follows LibrePods' Android app here:
   takeover only touch players that play audio here (their process, or one it started, has an
   audio stream). A remote control such as Spotify Connect reports Playing while the phone
   plays: resuming it resumed the phone, which took the AirPods straight back.
+- **Standby**: while this computer owns the audio but nothing plays on the AirPods, their
+  audio stream is closed (the profile off), as a Mac leaves it closed until sound plays.
+  Linux opens it at connect and keeps it open, and with it open, another device joining the
+  AirPods (the iPhone reconnecting when an AirPod goes back in, or picking them as its
+  output) makes them drop this computer ("Low Resources"). Meanwhile a stand-in output with
+  the AirPods' name keeps their place (and the default); when anything plays on it, podsd
+  turns them back on and moves the sound over, pausing players across the switch. Standby
+  comes at connect, 5 s after playback stops, and at once when both AirPods come out or
+  another device starts joining. `standbyWhenIdle` turns it off.
 - The phone switches silently: unlike what LibrePods saw on Android, the iPhone sends no smart
   routing messages to this computer (tested with iOS on an iPhone, AirPods Pro 3), so no
   "Moved to" notice appears on it.
@@ -251,6 +260,7 @@ Every key is optional:
   "earPause": true,
   "disconnectWhenNotWearing": false,
   "takeoverOnPlay": true,
+  "standbyWhenIdle": true,
   "conversationVolume": true,
   "stemControl": false,
   "restartWireplumber": false,
@@ -265,6 +275,7 @@ Every key is optional:
 | `earPause` | pause media when an AirPod comes out, resume when it goes back. Also off while the AirPods' `ear-detection` setting is off, as on iOS (podsd knows the value set through it; the AirPods don't report changes made elsewhere) |
 | `disconnectWhenNotWearing` | switch the AirPods' audio profile off while neither is worn |
 | `takeoverOnPlay` | when audio starts playing here with an AirPod in, take the AirPods over from the other device (needs Apple's Device ID; see [Switching between devices](#switching-between-devices)) |
+| `standbyWhenIdle` | close the AirPods' audio stream while nothing plays here, with a stand-in output in their place (see [Switching between devices](#switching-between-devices)): otherwise another device joining them drops this computer |
 | `conversationVolume` | lower the volume while Conversation Awareness hears you speak |
 | `stemControl` | double press: next track, triple press: previous track |
 | `restartWireplumber` | restart WirePlumber when the AirPods have no A2DP profile (cuts all audio for a moment) |

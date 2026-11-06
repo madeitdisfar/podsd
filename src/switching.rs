@@ -15,8 +15,10 @@
 use crate::bluetooth::aacp::{AACPManager, AudioSourceType, ConnectedDevice, ControlCommandIdentifiers};
 use crate::hub::Hub;
 use crate::media_controller::{
-    MediaController, local_audio_active_sync, playing_players_sync, resume_players_sync,
+    MediaController, local_audio_active_sync, pause_players_sync, playing_players_sync,
+    resume_players_sync,
 };
+use crate::standby;
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -56,7 +58,26 @@ struct State {
     /// Other devices sent this computer's media information and "new tipi"
     /// message since they (last) connected
     greeted: HashSet<String>,
+    /// The audio is on standby (see standby.rs)
+    standby: Option<Standby>,
+    /// Since when nothing has played on the AirPods (None: not since this
+    /// session started, so standby comes at once)
+    idle_since: Option<Instant>,
+    /// Go on standby as soon as nothing plays (both AirPods out, or another
+    /// device joining), not after STANDBY_AFTER
+    standby_soon: bool,
 }
+
+/// The audio on standby: the stand-in output's module and name, and whether
+/// the AirPods were the default output
+struct Standby {
+    module: u32,
+    name: String,
+    was_default: bool,
+}
+
+/// Standby comes after nothing has played on the AirPods this long
+const STANDBY_AFTER: Duration = Duration::from_secs(5);
 
 /// A connected-devices entry's first info byte: 0 disconnected, 1 still
 /// connecting, 2 connected
@@ -75,11 +96,197 @@ pub struct Switcher {
     aacp: AACPManager,
     media: MediaController,
     state: Arc<Mutex<State>>,
+    /// Held while going on or off standby, so the two never overlap
+    standby_turn: Arc<Mutex<()>>,
 }
 
 impl Switcher {
     pub fn new(hub: Hub, address: String, aacp: AACPManager, media: MediaController) -> Self {
-        Switcher { hub, address, aacp, media, state: Arc::new(Mutex::new(State::default())) }
+        Switcher {
+            hub,
+            address,
+            aacp,
+            media,
+            state: Arc::new(Mutex::new(State::default())),
+            standby_turn: Arc::new(Mutex::new(())),
+        }
+    }
+
+    fn standby_enabled(&self) -> bool {
+        self.hub.config().standby_when_idle
+    }
+
+    /// Puts the audio on standby if this computer owns the AirPods and nothing
+    /// plays on them: a stand-in output takes their place (and their streams,
+    /// and the default if they had it), then their profile goes off.
+    async fn enter_standby(&self) {
+        if !self.standby_enabled() {
+            return;
+        }
+        let _turn = self.standby_turn.lock().await;
+        {
+            let st = self.state.lock().await;
+            if st.standby.is_some() || !st.owned {
+                return;
+            }
+        }
+        let snapshot = tokio::task::spawn_blocking(standby::Snapshot::take).await.ok();
+        let Some(snapshot) = snapshot else { return };
+        let Some(airpods) = snapshot.airpods_sink(&self.address) else { return };
+        if snapshot.playing_on(airpods.index) {
+            return;
+        }
+        let was_default = snapshot.default == airpods.name;
+        let name = standby::stand_in_name(&self.address);
+        let module = {
+            let (mac, description) = (self.address.clone(), airpods.description.clone());
+            tokio::task::spawn_blocking(move || standby::add_stand_in(&mac, &description))
+                .await
+                .ok()
+                .flatten()
+        };
+        let Some(module) = module else {
+            warn!("{}: couldn't add the AirPods' stand-in output, staying on", self.address);
+            return;
+        };
+        {
+            let name = name.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if was_default {
+                    standby::set_default(&name);
+                }
+                standby::move_streams(&snapshot, airpods.index, &name);
+            })
+            .await;
+        }
+        {
+            let mut st = self.state.lock().await;
+            st.standby = Some(Standby { module, name, was_default });
+            st.standby_soon = false;
+        }
+        self.media.set_standby(true).await;
+        let _ = self.media.deactivate_a2dp_profile().await;
+        info!("{}: nothing playing, audio on standby", self.address);
+    }
+
+    /// Ends standby. `bring_back`: turn the AirPods' audio back on and move the
+    /// stand-in's streams (and the default) to them; otherwise (another device
+    /// took them, or the session ends) just remove the stand-in.
+    async fn leave_standby(&self, bring_back: bool) {
+        let _turn = self.standby_turn.lock().await;
+        let Some(sb) = self.state.lock().await.standby.take() else { return };
+        self.media.set_standby(false).await;
+        if bring_back {
+            self.media.activate_a2dp_profile().await;
+            // The output appears a moment after the profile
+            let mut found = None;
+            for _ in 0..50 {
+                let snapshot = tokio::task::spawn_blocking(standby::Snapshot::take).await.ok();
+                if let Some(snapshot) = snapshot
+                    && let Some(sink) = snapshot.airpods_sink(&self.address)
+                {
+                    found = Some((sink, snapshot));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            match found {
+                Some((sink, snapshot)) => {
+                    let stand_in = snapshot.find(&sb.name);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        // Still the default (not changed by hand meanwhile)
+                        if sb.was_default && snapshot.default == sb.name {
+                            standby::set_default(&sink.name);
+                        }
+                        if let Some(stand_in) = stand_in {
+                            standby::move_streams(&snapshot, stand_in.index, &sink.name);
+                        }
+                    })
+                    .await;
+                }
+                None => warn!("{}: the AirPods' output didn't come back", self.address),
+            }
+        }
+        let module = sb.module;
+        let _ = tokio::task::spawn_blocking(move || standby::remove_stand_in(module)).await;
+        self.state.lock().await.idle_since = Some(Instant::now());
+        info!("{}: audio {}", self.address, if bring_back { "back from standby" } else { "standby ended" });
+    }
+
+    /// Something plays on the stand-in: bring the AirPods back. Players are
+    /// paused across the switch and resumed after, so nothing is lost.
+    async fn wake(&self) {
+        let players = tokio::task::spawn_blocking(playing_players_sync).await.unwrap_or_default();
+        self.media.mark_self_action().await;
+        if !players.is_empty() {
+            let p = players.clone();
+            let _ = tokio::task::spawn_blocking(move || pause_players_sync(&p)).await;
+        }
+        self.leave_standby(true).await;
+        if !players.is_empty() {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            self.media.mark_self_action().await;
+            let _ = tokio::task::spawn_blocking(move || resume_players_sync(&players)).await;
+        }
+    }
+
+    /// Standby, each tick of the playback loop: on standby, wake when the
+    /// stand-in plays; owning the AirPods with nothing playing on them, go on
+    /// standby (at once at first, or when asked to soon)
+    async fn standby_tick(&self) {
+        if !self.standby_enabled() {
+            return;
+        }
+        let (owned, standby_name, soon, idle_since) = {
+            let st = self.state.lock().await;
+            (st.owned, st.standby.as_ref().map(|s| s.name.clone()), st.standby_soon, st.idle_since)
+        };
+        if !owned {
+            if standby_name.is_some() {
+                self.leave_standby(false).await;
+            }
+            return;
+        }
+        let Ok(snapshot) = tokio::task::spawn_blocking(standby::Snapshot::take).await else { return };
+        if let Some(name) = standby_name {
+            match snapshot.find(&name) {
+                Some(stand_in) if snapshot.playing_on(stand_in.index) => {
+                    info!("{}: sound on standby, bringing the AirPods back", self.address);
+                    self.wake().await;
+                }
+                Some(_) => {}
+                // Removed by someone else: nothing to stand in for
+                None => self.leave_standby(true).await,
+            }
+            return;
+        }
+        let Some(airpods) = snapshot.airpods_sink(&self.address) else { return };
+        if snapshot.playing_on(airpods.index) {
+            let mut st = self.state.lock().await;
+            st.idle_since = Some(Instant::now());
+            st.standby_soon = false;
+            return;
+        }
+        let due = soon || idle_since.is_none_or(|t| t.elapsed() >= STANDBY_AFTER);
+        if due {
+            self.enter_standby().await;
+        }
+    }
+
+    /// Asks for standby as soon as nothing plays, and tries at once
+    async fn standby_now(&self) {
+        if !self.standby_enabled() {
+            return;
+        }
+        self.state.lock().await.standby_soon = true;
+        let this = self.clone();
+        tokio::spawn(async move { this.enter_standby().await });
+    }
+
+    /// The session ends: remove the stand-in (the session then turns the
+    /// AirPods' audio back on, as always when it ends)
+    pub async fn end(&self) {
+        self.leave_standby(false).await;
     }
 
     /// The other devices on the AirPods (connected devices report, minus this
@@ -115,6 +322,11 @@ impl Switcher {
     /// it connected; one that leaves is introduced again when it's back.
     pub async fn greet(&self, devices: &[ConnectedDevice]) {
         let local = self.hub.local_mac().to_ascii_uppercase();
+        // Another device joining while this computer's audio stream is open
+        // makes the AirPods drop this computer: close it now if it's idle
+        if devices.iter().any(|d| d.info1 == 1 && d.mac.to_ascii_uppercase() != local) {
+            self.standby_now().await;
+        }
         let new: Vec<String> = {
             let mut st = self.state.lock().await;
             st.greeted.retain(|mac| {
@@ -194,6 +406,8 @@ impl Switcher {
             others
         );
         self.media.set_elsewhere(false).await;
+        self.leave_standby(true).await;
+        self.state.lock().await.idle_since = Some(Instant::now());
         let players = tokio::task::spawn_blocking(playing_players_sync).await.unwrap_or_default();
         let _ = self
             .aacp
@@ -229,8 +443,13 @@ impl Switcher {
     /// resuming, and takes it back if the AirPods hand it away anyway.
     pub async fn on_ear(&self, was_in: bool, any_in: bool) {
         if was_in && !any_in {
-            let mut st = self.state.lock().await;
-            st.owner_at_removal = st.owned && !self.others().await.is_empty();
+            {
+                let mut st = self.state.lock().await;
+                st.owner_at_removal = st.owned && !self.others().await.is_empty();
+            }
+            // Both out: the AirPods let a non-owner iPhone go, and it joins
+            // again when one goes back in; be on standby by then
+            self.standby_now().await;
             return;
         }
         if was_in || !any_in {
@@ -295,6 +514,7 @@ impl Switcher {
         }
         if lost {
             info!("{}: another device took the AirPods", self.address);
+            self.leave_standby(false).await;
             self.media.set_elsewhere(true).await;
             self.media.pause_all_media().await;
             let _ = self.media.deactivate_a2dp_profile().await;
@@ -321,6 +541,7 @@ impl Switcher {
             .aacp
             .send_control_command(ControlCommandIdentifiers::OwnsConnection, &[0x00])
             .await;
+        self.leave_standby(false).await;
         self.media.set_elsewhere(true).await;
         self.media.pause_all_media().await;
         let _ = self.media.deactivate_a2dp_profile().await;
@@ -444,6 +665,7 @@ impl Switcher {
         loop {
             tokio::time::sleep(POLL).await;
             let active = tokio::task::spawn_blocking(local_audio_active_sync).await.unwrap_or(false);
+            self.standby_tick().await;
             let (started, changed, blocked) = {
                 let mut st = self.state.lock().await;
                 let started = active && !st.was_active;

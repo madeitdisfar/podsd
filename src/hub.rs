@@ -31,6 +31,9 @@ pub struct Session {
 impl Session {
     pub async fn stop(self) {
         self.media.stop().await;
+        if let Some(switcher) = &self.switcher {
+            switcher.end().await;
+        }
         // Don't leave the AirPods silent once nothing manages them.
         self.media.restore_profile_if_off().await;
         self.aacp.shutdown().await;

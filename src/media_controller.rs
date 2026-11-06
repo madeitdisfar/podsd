@@ -52,6 +52,9 @@ struct MediaControllerState {
     disconnect_when_not_wearing: bool,
     /// Another device has the AirPods' audio: ear detection is its business
     elsewhere: bool,
+    /// The AirPods' audio is in standby (see standby.rs): the profile stays
+    /// off until the switcher brings it back
+    standby: bool,
     /// When podsd itself last paused or resumed playback (ear detection)
     self_action_at: Option<std::time::Instant>,
     conv_original_volume: Option<u32>,
@@ -74,6 +77,7 @@ impl MediaControllerState {
             ear_detection_enabled: true,
             disconnect_when_not_wearing: false,
             elsewhere: false,
+            standby: false,
             self_action_at: None,
             conv_original_volume: None,
             conv_conversation_started: false,
@@ -106,13 +110,18 @@ impl MediaController {
         self.state.lock().await.self_action_at.is_some_and(|t| t.elapsed() < within)
     }
 
-    async fn mark_self_action(&self) {
+    pub async fn mark_self_action(&self) {
         self.state.lock().await.self_action_at = Some(std::time::Instant::now());
     }
 
     /// Another device has the AirPods' audio (or this computer has it again)
     pub async fn set_elsewhere(&self, elsewhere: bool) {
         self.state.lock().await.elsewhere = elsewhere;
+    }
+
+    /// The AirPods' audio went into standby, or out of it
+    pub async fn set_standby(&self, standby: bool) {
+        self.state.lock().await.standby = standby;
     }
 
     pub async fn set_options(&self, disconnect_when_not_wearing: bool, restart_wireplumber: bool) {
@@ -213,7 +222,10 @@ impl MediaController {
 
         if new_has_at_least_one_in && old_all_out {
             debug!("Condition met: buds inserted, activating A2DP and checking play state");
-            self.activate_a2dp_profile().await;
+            // In standby the audio comes back when something plays
+            if !self.state.lock().await.standby {
+                self.activate_a2dp_profile().await;
+            }
             {
                 let mut state = self.state.lock().await;
                 if state.is_playing {
@@ -675,6 +687,9 @@ impl MediaController {
     /// remembers across reconnects). Run when a session starts and when it ends, so
     /// the AirPods aren't left silent without the daemon.
     pub async fn restore_profile_if_off(&self) {
+        if self.state.lock().await.standby {
+            return;
+        }
         let mac = self.state.lock().await.connected_device_mac.clone();
         let Some(index) = self.get_audio_device_index(&mac).await else {
             return;
@@ -1004,6 +1019,17 @@ pub fn playing_players_sync() -> Vec<String> {
                 .unwrap_or(false)
         })
         .collect()
+}
+
+/// Pauses these players
+pub fn pause_players_sync(players: &[String]) {
+    let Ok(conn) = Connection::new_session() else {
+        return;
+    };
+    for service in players {
+        let proxy = conn.with_proxy(service, "/org/mpris/MediaPlayer2", Duration::from_secs(2));
+        let _ = proxy.method_call::<(), _, &str, &str>("org.mpris.MediaPlayer2.Player", "Pause", ());
+    }
 }
 
 /// Plays those of these players that aren't playing now. The AirPods pause the
