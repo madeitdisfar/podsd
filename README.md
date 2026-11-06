@@ -233,6 +233,13 @@ podsd follows LibrePods' Android app here:
   back", until `MoveHere()`.
 - podsd tells the other device whenever playback here starts or stops, and gives up the
   audio when the AirPods report the other device playing.
+- Pausing (when an AirPod comes out, or another device takes them) and resuming after a
+  takeover only touch players that play audio here (their process, or one it started, has an
+  audio stream). A remote control such as Spotify Connect reports Playing while the phone
+  plays: resuming it resumed the phone, which took the AirPods straight back.
+- The phone switches silently: unlike what LibrePods saw on Android, the iPhone sends no smart
+  routing messages to this computer (tested with iOS on an iPhone, AirPods Pro 3), so no
+  "Moved to" notice appears on it.
 
 ## Config
 

@@ -101,6 +101,30 @@ impl MediaController {
     /// so a session's shutdown reads the same.
     pub async fn stop(&self) {}
 
+    /// The MPRIS players that play audio on this computer: the player's process
+    /// (or one it started, as browsers play from child processes) has an audio
+    /// stream here. Leaves out remote controls such as Spotify Connect, which
+    /// report Playing while a phone plays: pausing or resuming them pauses or
+    /// resumes the phone, which then takes the AirPods back.
+    fn local_players(conn: &Connection) -> Vec<String> {
+        let streams = stream_pids_sync();
+        let dbus = conn.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", Duration::from_secs(2));
+        Self::list_mpris_services(conn)
+            .into_iter()
+            .filter(|service| {
+                let pid: Option<u32> = dbus
+                    .method_call("org.freedesktop.DBus", "GetConnectionUnixProcessID", (service.as_str(),))
+                    .ok()
+                    .map(|(pid,): (u32,)| pid);
+                let local = pid.is_some_and(|pid| streams.iter().any(|s| descends_from(*s, pid)));
+                if !local {
+                    debug!("{} plays nothing here (a remote control?), leaving it alone", service);
+                }
+                local
+            })
+            .collect()
+    }
+
     fn is_kdeconnect_service(service: &str) -> bool {
         service.starts_with("org.mpris.MediaPlayer2.kdeconnect.mpris_")
     }
@@ -302,7 +326,7 @@ impl MediaController {
             };
             let mut paused_services = Vec::new();
 
-            for service in Self::list_mpris_services(&conn) {
+            for service in Self::local_players(&conn) {
                 debug!("Checking playback status for service: {}", service);
                 let proxy = conn.with_proxy(
                     &service,
@@ -355,7 +379,7 @@ impl MediaController {
             };
             let mut paused_count = 0;
 
-            for service in Self::list_mpris_services(&conn) {
+            for service in Self::local_players(&conn) {
                 let proxy =
                     conn.with_proxy(&service, "/org/mpris/MediaPlayer2", Duration::from_secs(5));
                 if let Ok(playback_status) =
@@ -928,7 +952,7 @@ pub fn playing_players_sync() -> Vec<String> {
     let Ok(conn) = Connection::new_session() else {
         return vec![];
     };
-    MediaController::list_mpris_services(&conn)
+    MediaController::local_players(&conn)
         .into_iter()
         .filter(|service| {
             conn.with_proxy(service, "/org/mpris/MediaPlayer2", Duration::from_secs(2))
@@ -957,6 +981,58 @@ pub fn resume_players_sync(players: &[String]) {
             info!("Resumed {} after taking the AirPods over", service);
         }
     }
+}
+
+/// The processes behind the audio streams here (application.process.id)
+fn stream_pids_sync() -> Vec<u32> {
+    let (mut mainloop, context) = match pulse_connect() {
+        Some(c) => c,
+        None => return vec![],
+    };
+    let pids = Rc::new(RefCell::new(Vec::new()));
+    let op = context.introspect().get_sink_input_info_list({
+        let pids = pids.clone();
+        move |result| {
+            if let ListResult::Item(item) = result
+                && let Some(pid) = item
+                    .proplist
+                    .get_str("application.process.id")
+                    .and_then(|p| p.parse::<u32>().ok())
+            {
+                pids.borrow_mut().push(pid);
+            }
+        }
+    });
+    while op.get_state() == OperationState::Running {
+        mainloop.iterate(false);
+    }
+    mainloop.quit(Retval(0));
+    let list = pids.borrow().clone();
+    list
+}
+
+/// Whether `pid` is `ancestor` or one of its descendants
+fn descends_from(mut pid: u32, ancestor: u32) -> bool {
+    for _ in 0..64 {
+        if pid == ancestor {
+            return true;
+        }
+        if pid <= 1 {
+            return false;
+        }
+        // /proc/<pid>/stat: "pid (comm) state ppid …"; comm may hold spaces
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some(after) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+            return false;
+        };
+        let Some(ppid) = after.split_whitespace().nth(1).and_then(|p| p.parse().ok()) else {
+            return false;
+        };
+        pid = ppid;
+    }
+    false
 }
 
 fn active_profile_sync(card_index: u32) -> Option<String> {
