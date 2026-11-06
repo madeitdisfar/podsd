@@ -44,6 +44,11 @@ struct State {
     reported: bool,
     /// Audio turned off here because another device has it
     off_for_other: bool,
+    /// This computer owned the audio when the last AirPod came out of an ear
+    owner_at_removal: bool,
+    /// Until then, losing the audio is the AirPods' choice on reinsertion, not
+    /// another device taking them: take them straight back
+    reclaim_until: Option<Instant>,
     /// When this computer last took them over: audio source reports right after
     /// can still name the other device, which mustn't make it give them back
     took_at: Option<Instant>,
@@ -51,6 +56,9 @@ struct State {
 
 /// Audio source reports this soon after taking over are ignored
 const TAKE_SETTLE: Duration = Duration::from_secs(2);
+/// After an AirPod goes back in, losing the audio this soon is the AirPods'
+/// own choice (they hand it to the other device while nothing plays here)
+const RECLAIM_WINDOW: Duration = Duration::from_secs(3);
 
 #[derive(Clone)]
 pub struct Switcher {
@@ -154,8 +162,59 @@ impl Switcher {
         }
     }
 
+    /// An AirPod went in or out of an ear (any_in: at least one is in now).
+    /// Ear detection pauses playback here when the last one comes out, so this
+    /// computer stops streaming; when one goes back in, the AirPods then gave
+    /// the audio to the other device (seen every time with an iPhone). An Apple
+    /// device resumes where it paused, so podsd claims the audio again before
+    /// resuming, and takes it back if the AirPods hand it away anyway.
+    pub async fn on_ear(&self, was_in: bool, any_in: bool) {
+        if was_in && !any_in {
+            let mut st = self.state.lock().await;
+            st.owner_at_removal = st.owned && !self.others().await.is_empty();
+            return;
+        }
+        if was_in || !any_in {
+            return;
+        }
+        let reclaim = {
+            let mut st = self.state.lock().await;
+            let r = st.owner_at_removal;
+            st.owner_at_removal = false;
+            if r {
+                st.reclaim_until = Some(Instant::now() + RECLAIM_WINDOW);
+            }
+            r
+        };
+        if !reclaim {
+            return;
+        }
+        info!("{}: AirPod back in, claiming the audio again", self.address);
+        let local = self.hub.local_mac().to_string();
+        let _ = self
+            .aacp
+            .send_control_command(ControlCommandIdentifiers::OwnsConnection, &[0x01])
+            .await;
+        for other in self.others().await {
+            let _ = self.aacp.send_media_information(&local, &other, true).await;
+        }
+    }
+
     /// The AirPods reported who owns the audio
     pub async fn on_ownership(&self, owns: bool) {
+        let reclaiming = !owns
+            && self
+                .state
+                .lock()
+                .await
+                .reclaim_until
+                .is_some_and(|t| Instant::now() < t);
+        if reclaiming {
+            info!("{}: the AirPods gave the audio away on reinsertion, taking it back", self.address);
+            self.state.lock().await.reclaim_until = None;
+            self.take_over(true).await;
+            return;
+        }
         let lost = {
             let mut st = self.state.lock().await;
             let lost = st.owned && !owns;

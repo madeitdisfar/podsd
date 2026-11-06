@@ -254,9 +254,13 @@ async fn handle_event(
                 s.ear_secondary = new.get(1).map(ear_name).unwrap_or_default().to_string();
             })
             .await;
+            let in_ear = |v: &Vec<EarDetectionStatus>| v.contains(&EarDetectionStatus::InEar);
+            let (was_in, any_in) = (in_ear(&old), in_ear(&new));
             if config.ear_pause {
                 media.handle_ear_detection(old, new).await;
             }
+            // After the pause / resume above, so the claim comes with playback
+            switcher.on_ear(was_in, any_in).await;
         }
         AACPEvent::ConversationalAwareness(status) => {
             if config.conversation_volume {
