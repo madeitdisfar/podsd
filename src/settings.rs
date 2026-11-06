@@ -43,12 +43,12 @@ pub struct SettingDef {
     pub label: &'static str,
 }
 
-/// In iOS's order.
+/// In the order iOS's AirPods settings show them.
 pub const LISTENING_MODES: &[(u8, &str)] = &[
     (0x01, "off"),
-    (0x02, "noise-cancellation"),
-    (0x04, "adaptive"),
     (0x03, "transparency"),
+    (0x04, "adaptive"),
+    (0x02, "noise-cancellation"),
 ];
 
 const SPEEDS: &[(u8, &str)] = &[(0x00, "default"), (0x01, "slower"), (0x02, "slowest")];

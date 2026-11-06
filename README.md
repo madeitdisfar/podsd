@@ -17,15 +17,58 @@ and tray and adds the D-Bus API and the fixes listed below.
 Tested with AirPods Pro 3 (A3064, firmware 90.3431000025000000.6807) on CachyOS, BlueZ 5.87,
 PipeWire + WirePlumber.
 
-| | |
+### Available
+
+| Feature | Notes |
 |---|---|
-| Battery (left, right, case, charging) | works |
-| Ear detection state | works |
-| Settings read (listening mode, Conversation Awareness, …) | works |
-| D-Bus API, `podsctl`, `watch` stream | works |
-| Changing listening mode / settings | works (checked by reading the settings back after reconnecting; the AirPods ignore mode changes while both are in the case) |
-| Pause on removal, Conversation Awareness volume, takeover | LibrePods' logic, not yet re-tested here |
-| BLE adverts (`bleMonitor`): battery while connected elsewhere, `CaseOpen` | works (lid and in-case bits worked out from a test with AirPods Pro 3) |
+| Battery: left, right, case, headset, charging | The case reports only while a bud is in it; otherwise its last reading is kept, with its time |
+| Ear detection state | Per bud (primary / secondary): in ear, out of ear, in case |
+| Listening mode: Off, Transparency, Adaptive, Noise Cancellation | `ListeningModes` follows iOS: Off needs Off Listening Mode; with one bud in an ear, Adaptive and Noise Cancellation need Noise Cancellation with One AirPod |
+| Settings | Off Listening Mode, Noise Cancellation with One AirPod, Adaptive Audio level, Conversation Awareness, Personalized Volume, Automatic Ear Detection, Pause Media When Falling Asleep, Press Speed, Press and Hold Duration, Volume Swipe and its wait. See [Settings](#settings) |
+| Name | Renames the AirPods (every device sees it); the BlueZ alias follows, dropping " - Find My" |
+| Connect, disconnect | Through BlueZ |
+| Case opened nearby (`CaseOpen`) | From BLE adverts (`bleMonitor`, needs BlueZ's experimental mode); clients show a popup |
+| Battery while connected elsewhere | From BLE adverts, decrypted with the pair's key |
+| Pause / resume media when a bud comes out / goes back | `earPause`; LibrePods' logic |
+| Lower the volume while you speak (Conversation Awareness) | `conversationVolume`; LibrePods' logic |
+| Take the AirPods over from a phone when media plays here | `takeoverOnPlay`; LibrePods' logic |
+| Stem presses | `StemPress` signal; double / triple press = next / previous track with `stemControl` |
+| Keep the audio codec | Turns a switched-off audio profile back on, preferring AAC |
+
+LibrePods' logic in the last rows works but hasn't been re-tested in every case here.
+
+### Not available
+
+Grouped as iOS's AirPods settings group them. "Control command" means the AirPods
+already report the setting over AACP (podsd sees the value), so adding it is mostly a matter
+of working out its encoding.
+
+| Feature | Notes |
+|---|---|
+| **Audio & Routing** | |
+| Loud Sound Reduction | Control command `0x29` (reported); LibrePods notes it needs VendorID spoofing |
+| Equalizer | The AirPods send EQ data (`0x53`); not parsed |
+| Spatial Audio, Personalized Spatial Audio | Head tracking stream not implemented |
+| Microphone (automatic / left / right) | Control command `0x01` |
+| Charging Case Sounds | Control command `0x31` |
+| **Controls & Gestures** | |
+| Press and hold actions per bud (listening modes to cycle, Siri) | Control commands `0x16` and `0x1A` |
+| Call controls (answer, mute, end) | Control command `0x24` (reported) |
+| Head Gestures | Needs the head tracking stream |
+| Camera Remote | iOS only |
+| **Accessibility** | |
+| Tone Volume | Control command `0x1F` (reported) |
+| **Hearing Health** | |
+| Hearing Assistance, hearing test, Hearing Aid | Control command `0x2C` (reported); LibrePods notes VendorID spoofing and ATT |
+| **Battery** | |
+| Optimized Charge Limit | Control command `0x3B` (reported) |
+| Charging notifications | Not in podsd; a client can notify (the dots shell warns at 10 %) |
+| **Others** | |
+| Find My | Needs Apple's network |
+| Heart rate | Control command `0x30` (reported); LibrePods has it as experimental |
+| Fit test (Acoustic Seal) | Not implemented |
+| High-quality two-way audio (microphone) | Work in progress in LibrePods (PRs #655, #888) |
+| Automatic switching like between Apple devices | Partly: `takeoverOnPlay` takes them over when media plays here |
 
 ## Install
 
@@ -45,7 +88,7 @@ Logs: `journalctl --user -u podsd`. `podsd --debug` also logs raw packets.
 ```
 podsctl status [--json]          state of every known pair
 podsctl watch                    JSON lines: the state now, then on every change
-podsctl mode <off|anc|adaptive|transparency>
+podsctl mode <off|transparency|adaptive|anc>
 podsctl settings [--json]        every setting, its value and what it accepts
 podsctl set <key> <value>        e.g. podsctl set conversation-awareness on
 podsctl connect | disconnect
@@ -102,7 +145,7 @@ Session bus, service `io.github.madeitdisfar.Podsd`.
 | `BatterySource` | s | `aacp`, `ble` (from adverts, while connected elsewhere) or `""` |
 | `EarPrimary`, `EarSecondary` | s | see above |
 | `InEar` | b | at least one bud in an ear |
-| `ListeningMode` | s | `off`, `noise-cancellation`, `adaptive`, `transparency` |
+| `ListeningMode` | s | `off`, `transparency`, `adaptive`, `noise-cancellation` |
 | `ListeningModes` | as | the modes `SetListeningMode` takes now: Off only with `allow-off-mode`; with one bud in an ear, noise cancellation and Adaptive only with `one-bud-anc` (as on iOS) |
 | `OwnsAudio` | b | this computer has the AirPods' audio (not the phone) |
 | `Settings` | a{sv} | every setting the AirPods reported, by key |

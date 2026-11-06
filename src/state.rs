@@ -216,7 +216,7 @@ mod tests {
     fn both_in_ears_offers_every_mode() {
         assert_eq!(
             pods("in-ear", "in-ear", false, true).listening_modes(),
-            ["off", "noise-cancellation", "adaptive", "transparency"]
+            ["off", "transparency", "adaptive", "noise-cancellation"]
         );
     }
 
@@ -230,7 +230,7 @@ mod tests {
     fn one_bud_with_one_bud_anc_offers_every_mode() {
         assert_eq!(
             pods("in-ear", "out-of-ear", true, true).listening_modes(),
-            ["off", "noise-cancellation", "adaptive", "transparency"]
+            ["off", "transparency", "adaptive", "noise-cancellation"]
         );
     }
 }
