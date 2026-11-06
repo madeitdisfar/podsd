@@ -52,6 +52,8 @@ struct MediaControllerState {
     disconnect_when_not_wearing: bool,
     /// Another device has the AirPods' audio: ear detection is its business
     elsewhere: bool,
+    /// When podsd itself last paused or resumed playback (ear detection)
+    self_action_at: Option<std::time::Instant>,
     conv_original_volume: Option<u32>,
     conv_conversation_started: bool,
     restart_wireplumber: bool,
@@ -72,6 +74,7 @@ impl MediaControllerState {
             ear_detection_enabled: true,
             disconnect_when_not_wearing: false,
             elsewhere: false,
+            self_action_at: None,
             conv_original_volume: None,
             conv_conversation_started: false,
             restart_wireplumber: false,
@@ -92,6 +95,19 @@ impl MediaController {
         MediaController {
             state: Arc::new(Mutex::new(state)),
         }
+    }
+
+    /// Whether podsd paused or resumed playback itself within `within`: such
+    /// changes aren't announced to the other device (LibrePods' Android app
+    /// ignores playback changes just after its own actions), which otherwise
+    /// heard "stopped streaming" when an AirPod came out and got the audio
+    /// when it went back in
+    pub async fn recent_self_action(&self, within: Duration) -> bool {
+        self.state.lock().await.self_action_at.is_some_and(|t| t.elapsed() < within)
+    }
+
+    async fn mark_self_action(&self) {
+        self.state.lock().await.self_action_at = Some(std::time::Instant::now());
     }
 
     /// Another device has the AirPods' audio (or this computer has it again)
@@ -338,6 +354,7 @@ impl MediaController {
 
     async fn pause(&self) {
         debug!("Pausing playback");
+        self.mark_self_action().await;
 
         let paused_services = tokio::task::spawn_blocking(|| {
             let conn = match Connection::new_session() {
@@ -436,6 +453,7 @@ impl MediaController {
 
     async fn resume(&self) {
         debug!("Resuming playback");
+        self.mark_self_action().await;
         let services = self.state.lock().await.paused_by_app_services.clone();
 
         if services.is_empty() {

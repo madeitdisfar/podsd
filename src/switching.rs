@@ -283,7 +283,8 @@ impl Switcher {
                 let recently_lost = st.lost_at.is_some_and(|t| t.elapsed() < LOST_GRACE);
                 (started, changed, recently_lost)
             };
-            if changed {
+            // Changes podsd made itself (ear detection) aren't the user's
+            if changed && !self.media.recent_self_action(Duration::from_secs(2)).await {
                 let local = self.hub.local_mac().to_string();
                 for other in self.others().await {
                     if let Err(e) = self.aacp.send_media_information(&local, &other, active).await {
