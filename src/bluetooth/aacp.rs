@@ -439,6 +439,28 @@ impl AACPManager {
         true
     }
 
+    /// Asks the AirPods for their state again: the handshake, feature flags and
+    /// notification request, which they answer with every setting and their
+    /// information. Right after a switch from another device they can take
+    /// half a minute to answer the first time.
+    pub async fn request_state(&self) -> Result<()> {
+        self.send_handshake().await?;
+        sleep(Duration::from_millis(300)).await;
+        self.send_set_feature_flags_packet().await?;
+        sleep(Duration::from_millis(300)).await;
+        self.send_notification_request().await
+    }
+
+    /// Whether the AirPods have reported their listening mode yet
+    pub async fn has_listening_mode(&self) -> bool {
+        self.state
+            .lock()
+            .await
+            .control_command_status_list
+            .iter()
+            .any(|s| s.identifier == ControlCommandIdentifiers::ListeningMode)
+    }
+
     pub async fn is_connected(&self) -> bool {
         self.state.lock().await.sender.is_some()
     }

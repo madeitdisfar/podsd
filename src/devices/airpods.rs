@@ -121,6 +121,26 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
         }));
     }
 
+    // After a switch from another device (a phone), the AirPods sometimes ignore
+    // the first handshake and report their settings half a minute later, leaving
+    // the listening mode unknown meanwhile. Asking again gets it at once.
+    {
+        let aacp = aacp.clone();
+        let address = address.clone();
+        tasks.push(tokio::spawn(async move {
+            for wait in [2, 3, 5, 10] {
+                sleep(Duration::from_secs(wait)).await;
+                if aacp.has_listening_mode().await {
+                    return;
+                }
+                info!("{}: no settings from the AirPods yet, asking again", address);
+                if let Err(e) = aacp.request_state().await {
+                    warn!("Asking {} for its state failed: {}", address, e);
+                }
+            }
+        }));
+    }
+
     if config.takeover_on_play {
         media
             .start_playback_listener(aacp.clone(), command_tx.clone())

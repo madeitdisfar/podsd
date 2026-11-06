@@ -258,6 +258,19 @@ impl DeviceIface {
         Ok(())
     }
 
+    /// Asks the AirPods to report their settings and information again.
+    async fn refresh(&self) -> fdo::Result<()> {
+        let aacp = self
+            .hub
+            .aacp(&self.address)
+            .await
+            .ok_or_else(|| fdo::Error::Failed("AirPods are not connected".into()))?;
+        info!("{}: asking for the state again", self.address);
+        aacp.request_state()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("Sending to the AirPods failed: {e}")))
+    }
+
     /// Asks BlueZ to connect the AirPods.
     async fn connect(&self) -> fdo::Result<()> {
         self.bluez_call("Connect").await
