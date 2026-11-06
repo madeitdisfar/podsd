@@ -5,7 +5,7 @@ use bluer::{
     Address, AddressType, Error, Result,
     l2cap::{SeqPacket, Socket, SocketAddr},
 };
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -900,20 +900,28 @@ impl AACPManager {
                 info!("Received Audio Source: {:?}", state.audio_source);
             }
             opcodes::CONNECTED_DEVICES => {
-                if payload.len() < 3 {
+                // The count is at packet byte 8 and the entries (6-byte address,
+                // two info bytes) start at byte 9, as LibrePods' Android app reads
+                // it. The count used to be read from byte 6, which cut the list
+                // short: the other device (a phone) never showed up.
+                info!("Connected Devices packet: {}", hex::encode(packet));
+                if payload.len() < 5 {
                     error!(
                         "Connected Devices packet too short: {}",
                         hex::encode(payload)
                     );
                     return;
                 }
-                let count = payload[2] as usize;
-                if payload.len() < 5 + count * 8 {
-                    error!(
-                        "Connected Devices packet length mismatch: {}",
+                let declared = payload[4] as usize;
+                // Take what fits, as Android does, if the packet is shorter
+                let count = declared.min((payload.len() - 5) / 8);
+                if count < declared {
+                    warn!(
+                        "Connected Devices packet holds {} of {} entries: {}",
+                        count,
+                        declared,
                         hex::encode(payload)
                     );
-                    return;
                 }
                 let mut devices = Vec::with_capacity(count);
                 for i in 0..count {
