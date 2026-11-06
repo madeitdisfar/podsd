@@ -189,6 +189,7 @@ impl DeviceIface {
 
     /// Takes the AirPods over from the other device (Move back, "Use here")
     async fn move_here(&self) -> fdo::Result<()> {
+        info!("{}: asked to move the AirPods here", self.address);
         if self.hub.move_here(&self.address).await {
             Ok(())
         } else {

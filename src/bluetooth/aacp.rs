@@ -469,6 +469,14 @@ impl AACPManager {
             .any(|s| s.identifier == ControlCommandIdentifiers::ListeningMode)
     }
 
+    /// Whether the AirPods have sent any notification (battery or ear
+    /// detection): without them there is no ownership or connected-devices
+    /// news either, so switching can't work.
+    pub async fn has_notifications(&self) -> bool {
+        let state = self.state.lock().await;
+        !state.battery_info.is_empty() || !state.ear_detection_status.is_empty()
+    }
+
     pub async fn is_connected(&self) -> bool {
         self.state.lock().await.sender.is_some()
     }

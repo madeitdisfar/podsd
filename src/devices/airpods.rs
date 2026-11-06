@@ -125,18 +125,29 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
     // If the handshake got lost, asking once more brings the settings at once.
     // After a switch from another device (a phone), though, the AirPods hold
     // their settings back for about 30 s whatever is sent (seen twice: retries
-    // at 2, 5, 10 and 20 s were all ignored), so one retry is enough; clients
-    // show the listening mode as unknown until it arrives.
+    // at 2, 5, 10 and 20 s were all ignored); clients show the listening mode
+    // as unknown until it arrives. The notification request can be lost on its
+    // own too: when the AirPods are busy with another device as this one
+    // connects, they answer the handshake seconds late and drop the request
+    // sent after it, so the settings arrive but no battery, ear detection,
+    // ownership or connected-devices news ever does. Ask again until both come.
     {
         let aacp = aacp.clone();
         let address = address.clone();
         tasks.push(tokio::spawn(async move {
-            for wait in [3] {
+            for wait in [3, 7, 20] {
                 sleep(Duration::from_secs(wait)).await;
-                if aacp.has_listening_mode().await {
+                let settings = aacp.has_listening_mode().await;
+                let notifications = aacp.has_notifications().await;
+                if settings && notifications {
                     return;
                 }
-                info!("{}: no settings from the AirPods yet, asking again", address);
+                let missing = match (settings, notifications) {
+                    (false, false) => "settings or notifications",
+                    (false, true) => "settings",
+                    _ => "notifications",
+                };
+                info!("{}: no {} from the AirPods yet, asking again", address, missing);
                 if let Err(e) = aacp.request_state().await {
                     warn!("Asking {} for its state failed: {}", address, e);
                 }
