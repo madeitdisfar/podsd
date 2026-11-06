@@ -38,12 +38,14 @@ fn pactl_json(what: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// An output: its index, name and description
+/// An output: its index, name, description, and volume (raw, per channel)
 #[derive(Debug, Clone)]
 pub struct Sink {
     pub index: u64,
     pub name: String,
     pub description: String,
+    pub volume: Vec<u64>,
+    pub muted: bool,
 }
 
 /// The audio right now: outputs, playback streams, and the default output
@@ -67,6 +69,11 @@ impl Snapshot {
             index: v["index"].as_u64().unwrap_or(u64::MAX),
             name: v["name"].as_str().unwrap_or_default().to_string(),
             description: v["description"].as_str().unwrap_or_default().to_string(),
+            volume: v["volume"]
+                .as_object()
+                .map(|channels| channels.values().filter_map(|c| c["value"].as_u64()).collect())
+                .unwrap_or_default(),
+            muted: v["mute"].as_bool().unwrap_or(false),
         }
     }
 
@@ -140,6 +147,23 @@ pub fn remove_stale_stand_ins() {
             remove_stand_in(index);
         }
     }
+}
+
+/// Gives an output another's volume and mute, so switching between the two
+/// changes neither (one value for all channels when their counts differ)
+pub fn copy_volume(from: &Sink, to: &str, to_channels: usize) {
+    if from.volume.is_empty() {
+        return;
+    }
+    let values: Vec<String> = if from.volume.len() == to_channels {
+        from.volume.iter().map(u64::to_string).collect()
+    } else {
+        vec![(from.volume.iter().sum::<u64>() / from.volume.len() as u64).to_string()]
+    };
+    let mut args = vec!["set-sink-volume", to];
+    args.extend(values.iter().map(String::as_str));
+    let _ = pactl(&args);
+    let _ = pactl(&["set-sink-mute", to, if from.muted { "1" } else { "0" }]);
 }
 
 pub fn set_default(sink: &str) {

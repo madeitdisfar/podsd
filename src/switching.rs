@@ -152,6 +152,9 @@ impl Switcher {
         {
             let name = name.clone();
             let _ = tokio::task::spawn_blocking(move || {
+                // Same volume first, so switching to it changes nothing
+                let channels = standby::Snapshot::take().find(&name).map_or(2, |s| s.volume.len());
+                standby::copy_volume(&airpods, &name, channels);
                 if was_default {
                     standby::set_default(&name);
                 }
@@ -194,6 +197,11 @@ impl Switcher {
                 Some((sink, snapshot)) => {
                     let stand_in = snapshot.find(&sb.name);
                     let _ = tokio::task::spawn_blocking(move || {
+                        // The stand-in's volume (changed meanwhile, perhaps)
+                        // goes to the AirPods before they take over
+                        if let Some(stand_in) = &stand_in {
+                            standby::copy_volume(stand_in, &sink.name, sink.volume.len());
+                        }
                         // Still the default (not changed by hand meanwhile)
                         if sb.was_default && snapshot.default == sb.name {
                             standby::set_default(&sink.name);
