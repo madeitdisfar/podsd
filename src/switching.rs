@@ -124,6 +124,11 @@ impl Switcher {
             st.paused_for_other = false;
             st.off_for_other = false;
             st.took_at = Some(Instant::now());
+            // Owning from now: the AirPods confirm a moment later, and a device
+            // list arriving in between must not count this computer as not
+            // owning (that turned the audio off right after every takeover)
+            st.owned = true;
+            st.reported = true;
             r
         };
         let local = self.hub.local_mac().to_string();
@@ -314,7 +319,8 @@ impl Switcher {
             // claim ownership for this computer at all.
             let turn_off = {
                 let mut st = self.state.lock().await;
-                let off = st.reported && !st.owned && !st.off_for_other;
+                let settling = st.took_at.is_some_and(|t| t.elapsed() < TAKE_SETTLE);
+                let off = st.reported && !st.owned && !st.off_for_other && !settling;
                 if off {
                     st.off_for_other = true;
                 }
