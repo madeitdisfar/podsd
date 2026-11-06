@@ -262,7 +262,7 @@ Every key is optional:
 
 | Key | |
 |---|---|
-| `earPause` | pause media when an AirPod comes out, resume when it goes back |
+| `earPause` | pause media when an AirPod comes out, resume when it goes back. Also off while the AirPods' `ear-detection` setting is off, as on iOS (podsd knows the value set through it; the AirPods don't report changes made elsewhere) |
 | `disconnectWhenNotWearing` | switch the AirPods' audio profile off while neither is worn |
 | `takeoverOnPlay` | when audio starts playing here with an AirPod in, take the AirPods over from the other device (needs Apple's Device ID; see [Switching between devices](#switching-between-devices)) |
 | `conversationVolume` | lower the volume while Conversation Awareness hears you speak |

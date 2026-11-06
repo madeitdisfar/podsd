@@ -256,11 +256,18 @@ async fn handle_event(
             .await;
             let in_ear = |v: &Vec<EarDetectionStatus>| v.contains(&EarDetectionStatus::InEar);
             let (was_in, any_in) = (in_ear(&old), in_ear(&new));
-            if config.ear_pause {
+            // The AirPods' own Automatic Ear Detection setting turns this off,
+            // as on iOS (pause / resume stop there too). The AirPods never report
+            // it, so this is the value set through podsd (or on by default).
+            let enabled = hub
+                .state(address)
+                .await
+                .is_some_and(|s| s.settings.get("ear-detection") != Some(&settings::SettingValue::Bool(false)));
+            if config.ear_pause && enabled {
                 media.handle_ear_detection(old, new).await;
+                // After the pause / resume above, so the claim comes with playback
+                switcher.on_ear(was_in, any_in).await;
             }
-            // After the pause / resume above, so the claim comes with playback
-            switcher.on_ear(was_in, any_in).await;
         }
         AACPEvent::ConversationalAwareness(status) => {
             if config.conversation_volume {
