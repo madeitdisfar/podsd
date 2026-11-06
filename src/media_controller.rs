@@ -1021,28 +1021,53 @@ pub fn resume_players_sync(players: &[String]) {
     }
 }
 
-/// The processes behind the audio streams here (application.process.id)
+/// The processes behind the audio streams here: the stream's
+/// application.process.id, else its client's. Apps on PipeWire's own API
+/// (Spotify) put the process only on the client, not on the stream.
 fn stream_pids_sync() -> Vec<u32> {
     let (mut mainloop, context) = match pulse_connect() {
         Some(c) => c,
         None => return vec![],
     };
+    fn pid_of(proplist: &Proplist, keys: &[&str]) -> Option<u32> {
+        keys.iter()
+            .find_map(|k| proplist.get_str(k).and_then(|p| p.parse::<u32>().ok()))
+    }
     let pids = Rc::new(RefCell::new(Vec::new()));
+    // Streams without a process: their clients
+    let clients = Rc::new(RefCell::new(Vec::new()));
     let op = context.introspect().get_sink_input_info_list({
         let pids = pids.clone();
+        let clients = clients.clone();
         move |result| {
-            if let ListResult::Item(item) = result
-                && let Some(pid) = item
-                    .proplist
-                    .get_str("application.process.id")
-                    .and_then(|p| p.parse::<u32>().ok())
-            {
-                pids.borrow_mut().push(pid);
+            if let ListResult::Item(item) = result {
+                match pid_of(&item.proplist, &["application.process.id"]) {
+                    Some(pid) => pids.borrow_mut().push(pid),
+                    None => clients.borrow_mut().extend(item.client),
+                }
             }
         }
     });
     while op.get_state() == OperationState::Running {
         mainloop.iterate(false);
+    }
+    if !clients.borrow().is_empty() {
+        let op = context.introspect().get_client_info_list({
+            let pids = pids.clone();
+            let clients = clients.clone();
+            move |result| {
+                if let ListResult::Item(item) = result
+                    && clients.borrow().contains(&item.index)
+                    && let Some(pid) =
+                        pid_of(&item.proplist, &["application.process.id", "pipewire.sec.pid"])
+                {
+                    pids.borrow_mut().push(pid);
+                }
+            }
+        });
+        while op.get_state() == OperationState::Running {
+            mainloop.iterate(false);
+        }
     }
     mainloop.quit(Retval(0));
     let list = pids.borrow().clone();
