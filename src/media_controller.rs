@@ -345,9 +345,27 @@ impl MediaController {
             return;
         }
 
-        let device_index = state.device_index;
         let mac = state.connected_device_mac.clone();
         drop(state);
+
+        // Already playing in high quality: setting the profile again makes
+        // PipeWire recreate the AirPods' output, and the stream of whatever is
+        // playing (the reason this runs) breaks, leaving the app playing into
+        // nothing. The card's index also changes with each connection, so look
+        // it up fresh.
+        let fresh = self.get_audio_device_index(&mac).await;
+        if let Some(idx) = fresh {
+            self.state.lock().await.device_index = Some(idx);
+            let active = tokio::task::spawn_blocking(move || active_profile_sync(idx))
+                .await
+                .ok()
+                .flatten();
+            if active.as_deref().is_some_and(|p| p.starts_with("a2dp-sink")) {
+                debug!("A2DP profile already active ({:?})", active);
+                return;
+            }
+        }
+        let device_index = self.state.lock().await.device_index;
 
         let mut current_device_index = device_index;
 
