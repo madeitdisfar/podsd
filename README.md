@@ -115,7 +115,7 @@ when the AirPods apply it:
 | `SetSetting(s key, v value)` | value: `b` for bool settings, `s` for choices, `i` for ints |
 | `DescribeSettings() → a(sssasii)` | (key, type `bool`/`choice`/`int`, label, choices, min, max) |
 | `Rename(s name)` | |
-| `Refresh()` | asks the AirPods to report their settings again (podsd also does this by itself when they haven't 2 s after connecting) |
+| `Refresh()` | asks the AirPods to report their settings again (podsd also does this once by itself when they haven't 3 s after connecting). Right after a switch from another device, AirPods Pro 3 report nothing for about 30 s whatever is sent; `ListeningMode` is `""` meanwhile |
 | `Connect()`, `Disconnect()` | through BlueZ |
 
 Signal `StemPress(s press, s bud)`: press `single`/`double`/`triple`/`long`, bud
