@@ -149,12 +149,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     hub.start_advert_timeout();
 
     if config.ble_monitor {
-        let hub = hub.clone();
-        tokio::spawn(async move {
-            if let Err(e) = bluetooth::le::start_le_monitor(hub).await {
-                warn!("BLE monitor stopped: {} (needs bluetoothd --experimental)", e);
-            }
-        });
+        tokio::spawn(run_le_monitor(hub.clone(), system.clone()));
     }
 
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -165,6 +160,62 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!("Shutting down");
     hub.shutdown().await;
     Ok(())
+}
+
+/// Runs the BLE watcher, and again whenever bluetoothd restarts: a restart drops
+/// its advertisement monitors without telling the client, so adverts just stop.
+async fn run_le_monitor(hub: Hub, system: Connection) {
+    let restarts = async {
+        let rule = MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender("org.freedesktop.DBus")?
+            .interface("org.freedesktop.DBus")?
+            .member("NameOwnerChanged")?
+            .arg(0, "org.bluez")?
+            .build();
+        MessageStream::for_match_rule(rule, &system, None).await
+    }
+    .await;
+    let mut restarts = match restarts {
+        Ok(s) => Some(s),
+        Err(e) => {
+            warn!("Can't follow bluetoothd restarts: {}", e);
+            None
+        }
+    };
+    loop {
+        let hub = hub.clone();
+        let monitor = tokio::spawn(async move {
+            if let Err(e) = bluetooth::le::start_le_monitor(hub).await {
+                warn!("BLE monitor stopped: {} (needs Experimental = true in /etc/bluetooth/main.conf)", e);
+            }
+        });
+        // Wait for bluetoothd to come back under a new owner
+        let Some(stream) = restarts.as_mut() else {
+            let _ = monitor.await;
+            return;
+        };
+        loop {
+            match stream.next().await {
+                Some(Ok(msg)) => {
+                    if let Ok((_, _, new_owner)) = msg.body().deserialize::<(String, String, String)>()
+                        && !new_owner.is_empty()
+                    {
+                        break;
+                    }
+                }
+                Some(Err(_)) => continue,
+                None => {
+                    let _ = monitor.await;
+                    return;
+                }
+            }
+        }
+        info!("bluetoothd restarted, watching for adverts again");
+        monitor.abort();
+        // Give bluetoothd a moment to set the adapter up
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// Follows BlueZ: AirPods connecting and disconnecting, and newly paired ones.
