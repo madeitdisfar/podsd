@@ -12,12 +12,13 @@
 //! tell clients (MovedTo), and don't take them back by itself for 3 s; after
 //! the other device's user tapped "Move back", not until asked by hand.
 
-use crate::bluetooth::aacp::{AACPManager, AudioSourceType, ControlCommandIdentifiers};
+use crate::bluetooth::aacp::{AACPManager, AudioSourceType, ConnectedDevice, ControlCommandIdentifiers};
 use crate::hub::Hub;
 use crate::media_controller::{
     MediaController, local_audio_active_sync, playing_players_sync, resume_players_sync,
 };
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -52,7 +53,14 @@ struct State {
     /// When this computer last took them over: audio source reports right after
     /// can still name the other device, which mustn't make it give them back
     took_at: Option<Instant>,
+    /// Other devices sent this computer's media information and "new tipi"
+    /// message since they (last) connected
+    greeted: HashSet<String>,
 }
+
+/// A connected-devices entry's first info byte: 0 disconnected, 1 still
+/// connecting, 2 connected
+const DEVICE_CONNECTED: u8 = 2;
 
 /// Audio source reports this soon after taking over are ignored
 const TAKE_SETTLE: Duration = Duration::from_secs(2);
@@ -85,6 +93,52 @@ impl Switcher {
             .map(|d| d.mac.clone())
             .filter(|m| m.to_ascii_uppercase() != local)
             .collect()
+    }
+
+    /// The other devices that are fully connected: the only ones messages
+    /// can be relayed to. Relaying to a device still connecting made the
+    /// AirPods drop this computer ("Low Resources", 0.2 s later, every time).
+    async fn reachable_others(&self) -> Vec<String> {
+        let local = self.hub.local_mac().to_ascii_uppercase();
+        let state = self.aacp.state.lock().await;
+        state
+            .connected_devices
+            .iter()
+            .filter(|d| d.info1 == DEVICE_CONNECTED && d.mac.to_ascii_uppercase() != local)
+            .map(|d| d.mac.clone())
+            .collect()
+    }
+
+    /// Introduces this computer to other devices once they are connected
+    /// (Android: on a new connected device, media information and "add tipi
+    /// device"). One still connecting is introduced when a later list shows
+    /// it connected; one that leaves is introduced again when it's back.
+    pub async fn greet(&self, devices: &[ConnectedDevice]) {
+        let local = self.hub.local_mac().to_ascii_uppercase();
+        let new: Vec<String> = {
+            let mut st = self.state.lock().await;
+            st.greeted.retain(|mac| {
+                devices.iter().any(|d| &d.mac == mac && d.info1 == DEVICE_CONNECTED)
+            });
+            let new: Vec<String> = devices
+                .iter()
+                .filter(|d| d.info1 == DEVICE_CONNECTED && d.mac.to_ascii_uppercase() != local)
+                .filter(|d| !st.greeted.contains(&d.mac))
+                .map(|d| d.mac.clone())
+                .collect();
+            st.greeted.extend(new.iter().cloned());
+            new
+        };
+        let local_mac = self.hub.local_mac().to_string();
+        for mac in new {
+            info!("New device on the AirPods: {}, sending media info", mac);
+            if let Err(e) = self.aacp.send_media_information_new_device(&local_mac, &mac).await {
+                error!("Failed to send media info to new device: {}", e);
+            }
+            if let Err(e) = self.aacp.send_add_tipi_device(&local_mac, &mac).await {
+                error!("Failed to send add tipi device: {}", e);
+            }
+        }
     }
 
     /// The kind of another device ("iPhone", …), for clients
@@ -132,7 +186,7 @@ impl Switcher {
             r
         };
         let local = self.hub.local_mac().to_string();
-        let others = self.others().await;
+        let others = self.reachable_others().await;
         info!(
             "{}: taking the AirPods over{} from {:?}",
             self.address,
@@ -200,7 +254,7 @@ impl Switcher {
             .aacp
             .send_control_command(ControlCommandIdentifiers::OwnsConnection, &[0x01])
             .await;
-        for other in self.others().await {
+        for other in self.reachable_others().await {
             let _ = self.aacp.send_media_information(&local, &other, true).await;
         }
     }
@@ -401,7 +455,7 @@ impl Switcher {
             // Changes podsd made itself (ear detection) aren't the user's
             if changed && !self.media.recent_self_action(Duration::from_secs(2)).await {
                 let local = self.hub.local_mac().to_string();
-                for other in self.others().await {
+                for other in self.reachable_others().await {
                     if let Err(e) = self.aacp.send_media_information(&local, &other, active).await {
                         warn!("Telling {} about playback here failed: {}", other, e);
                     }

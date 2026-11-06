@@ -164,7 +164,6 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
 
     {
         let hub = hub.clone();
-        let aacp = aacp.clone();
         let media = media.clone();
         let address = address.clone();
         let switcher = switcher.clone();
@@ -177,7 +176,7 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
                     tokio::spawn(async move { hub.on_channel_closed(&address).await });
                     break;
                 }
-                handle_event(&hub, &aacp, &media, &switcher, &address, event).await;
+                handle_event(&hub, &media, &switcher, &address, event).await;
             }
         }));
     }
@@ -197,7 +196,6 @@ fn ear_name(status: &EarDetectionStatus) -> &'static str {
 
 async fn handle_event(
     hub: &Hub,
-    aacp: &AACPManager,
     media: &MediaController,
     switcher: &Switcher,
     address: &str,
@@ -296,28 +294,9 @@ async fn handle_event(
             .await;
             hub.sync_alias(address, &info.name, false).await;
         }
-        AACPEvent::ConnectedDevices(old_devices, new_devices) => {
+        AACPEvent::ConnectedDevices(_, new_devices) => {
             switcher.refresh_other().await;
-            let local_mac = hub.local_mac().to_string();
-            for device in new_devices.iter().filter(|d| {
-                d.mac != local_mac && old_devices.iter().all(|o| o.mac != d.mac)
-            }) {
-                info!("New device on the AirPods: {}, sending media info", device.mac);
-                let aacp = aacp.clone();
-                let local_mac = local_mac.clone();
-                let device_mac = device.mac.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = aacp
-                        .send_media_information_new_device(&local_mac, &device_mac)
-                        .await
-                    {
-                        error!("Failed to send media info to new device: {}", e);
-                    }
-                    if let Err(e) = aacp.send_add_tipi_device(&local_mac, &device_mac).await {
-                        error!("Failed to send add tipi device: {}", e);
-                    }
-                });
-            }
+            switcher.greet(&new_devices).await;
         }
         AACPEvent::OwnershipToFalseRequest { sender, reversed } => {
             switcher.on_taken(&sender, reversed).await;
