@@ -52,6 +52,8 @@ pub const LISTENING_MODES: &[(u8, &str)] = &[
 ];
 
 const SPEEDS: &[(u8, &str)] = &[(0x00, "default"), (0x01, "slower"), (0x02, "slowest")];
+// Press and hold duration, named as iOS names it
+const DURATIONS: &[(u8, &str)] = &[(0x00, "default"), (0x01, "shorter"), (0x02, "shortest")];
 
 // Android sends 1 for "default"; AirPods Pro 3 report 0 until it's changed.
 const SWIPE_LENGTHS: &[(u8, &str)] = &[
@@ -131,7 +133,7 @@ pub const SETTINGS: &[SettingDef] = &[
     SettingDef {
         key: "press-hold-duration",
         id: Id::ClickHoldInterval,
-        kind: Kind::Choice(SPEEDS),
+        kind: Kind::Choice(DURATIONS),
         label: "Press and hold duration",
     },
 ];

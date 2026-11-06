@@ -146,7 +146,8 @@ busctl --user call io.github.madeitdisfar.Podsd \
 | `sleep-detection` | bool | pause media when falling asleep |
 | `volume-swipe` | bool | volume control by swiping the stem |
 | `volume-swipe-length` | choice | `default`, `longer`, `longest` |
-| `press-speed`, `press-hold-duration` | choice | `default`, `slower`, `slowest` |
+| `press-speed` | choice | `default`, `slower`, `slowest` |
+| `press-hold-duration` | choice | `default`, `shorter`, `shortest` (as iOS names them) |
 
 The AirPods report every setting when the control channel opens but don't confirm
 changes (only listening mode changes come back), so `SetSetting` updates `Settings` once
