@@ -103,6 +103,7 @@ Session bus, service `io.github.madeitdisfar.Podsd`.
 | `EarPrimary`, `EarSecondary` | s | see above |
 | `InEar` | b | at least one bud in an ear |
 | `ListeningMode` | s | `off`, `noise-cancellation`, `adaptive`, `transparency` |
+| `ListeningModes` | as | the modes `SetListeningMode` takes now: Off only with `allow-off-mode`; with one bud in an ear, noise cancellation and Adaptive only with `one-bud-anc` (as on iOS) |
 | `OwnsAudio` | b | this computer has the AirPods' audio (not the phone) |
 | `Settings` | a{sv} | every setting the AirPods reported, by key |
 

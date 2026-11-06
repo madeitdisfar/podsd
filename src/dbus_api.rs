@@ -172,6 +172,11 @@ impl DeviceIface {
     async fn listening_mode(&self) -> String {
         self.st().await.listening_mode
     }
+    /// The modes SetListeningMode takes now (see DeviceState::listening_modes)
+    #[zbus(property)]
+    async fn listening_modes(&self) -> Vec<String> {
+        self.st().await.listening_modes()
+    }
     #[zbus(property)]
     async fn owns_audio(&self) -> bool {
         self.st().await.owns_audio
@@ -194,6 +199,12 @@ impl DeviceIface {
                     LISTENING_MODES.iter().map(|(_, n)| *n).collect::<Vec<_>>().join(", ")
                 ))
             })?;
+        let state = self.st().await;
+        if state.ready && !state.listening_modes().contains(&mode) {
+            return Err(fdo::Error::Failed(format!(
+                "{mode} isn't available now (one AirPod in an ear needs \"Noise Cancellation with one AirPod\"; Off needs \"Off listening mode\")"
+            )));
+        }
         info!("{}: listening mode -> {}", self.address, mode);
         self.send(ControlCommandIdentifiers::ListeningMode, &[raw]).await
     }

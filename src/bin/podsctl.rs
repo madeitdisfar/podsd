@@ -139,6 +139,8 @@ fn device_json(props: &Props) -> Json {
             "inEar": get(props, "InEar"),
         },
         "listeningMode": get(props, "ListeningMode"),
+        // the modes it can switch to now
+        "listeningModes": get(props, "ListeningModes"),
         "ownsAudio": get(props, "OwnsAudio"),
         "caseOpen": get(props, "CaseOpen"),
         "settings": get(props, "Settings"),
