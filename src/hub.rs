@@ -202,6 +202,11 @@ impl Hub {
             if let Some(open) = news {
                 entry.lid_open = open;
             }
+            // Both buds in ears (status 0x02 and 0x08): nothing in the case can
+            // tell when it closes, and they're in use: the card's moment is over
+            if advert.status & 0x0a == 0x0a {
+                entry.lid_open = false;
+            }
             entry.near = entry.lid_open && (entry.near || strong);
             (news, entry.lid_open && entry.near)
         };
