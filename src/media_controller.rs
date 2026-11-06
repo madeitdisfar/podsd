@@ -229,7 +229,7 @@ impl MediaController {
                 if state.disconnect_when_not_wearing {
                     debug!("Disconnect when not wearing enabled, deactivating A2DP");
                     drop(state);
-                    self.deactivate_a2dp_profile().await;
+                    let _ = self.deactivate_a2dp_profile().await;
                 }
             }
         }
@@ -618,7 +618,9 @@ impl MediaController {
             .unwrap_or(None)
     }
 
-    pub async fn deactivate_a2dp_profile(&self) {
+    /// Switches the AirPods' audio profile off. Returns whether it did (false
+    /// while their audio card isn't there yet, as right after connecting).
+    pub async fn deactivate_a2dp_profile(&self) -> bool {
         debug!("Entering deactivate_a2dp_profile");
         let mut state = self.state.lock().await;
 
@@ -630,7 +632,7 @@ impl MediaController {
 
         if state.connected_device_mac.is_empty() || state.device_index.is_none() {
             warn!("Connected device MAC or index is empty, cannot deactivate A2DP profile");
-            return;
+            return false;
         }
         let device_index = state.device_index.unwrap();
         drop(state);
@@ -663,7 +665,10 @@ impl MediaController {
             info!("Successfully deactivated A2DP profile");
         } else {
             warn!("Failed to deactivate A2DP profile");
+            // The card may have gone (and come back under a new index)
+            self.state.lock().await.device_index = None;
         }
+        success
     }
 
     /// Turns the AirPods' audio back on if their profile is "off" (which WirePlumber

@@ -243,7 +243,7 @@ impl Switcher {
             info!("{}: another device took the AirPods", self.address);
             self.media.set_elsewhere(true).await;
             self.media.pause_all_media().await;
-            self.media.deactivate_a2dp_profile().await;
+            let _ = self.media.deactivate_a2dp_profile().await;
             let name = self.other_device().await;
             self.hub.emit_moved_to(&self.address, &name, false).await;
         }
@@ -269,7 +269,7 @@ impl Switcher {
             .await;
         self.media.set_elsewhere(true).await;
         self.media.pause_all_media().await;
-        self.media.deactivate_a2dp_profile().await;
+        let _ = self.media.deactivate_a2dp_profile().await;
         let name = self.device_name(sender).await;
         self.hub.emit_moved_to(&self.address, &name, reversed).await;
         self.refresh_other().await;
@@ -305,9 +305,43 @@ impl Switcher {
         self.refresh_other().await;
     }
 
+    /// Before any ownership report (the AirPods send none at connect), takes
+    /// ownership from the device list: bit 0x02 of an entry's second info
+    /// byte marks the device that owns the audio (it matched every
+    /// OwnsConnection report seen, for this computer and for an iPhone).
+    async fn ownership_from_devices(&self) {
+        if self.state.lock().await.reported {
+            return;
+        }
+        let local = self.hub.local_mac().to_ascii_uppercase();
+        let owner = {
+            let st = self.aacp.state.lock().await;
+            st.connected_devices
+                .iter()
+                .find(|d| d.info2 & 0x02 != 0)
+                .map(|d| d.mac.to_ascii_uppercase() == local)
+        };
+        let Some(owns) = owner else { return };
+        {
+            let mut st = self.state.lock().await;
+            if st.reported {
+                return;
+            }
+            st.owned = owns;
+            st.reported = true;
+        }
+        info!(
+            "{}: the device list says {} owns the audio",
+            self.address,
+            if owns { "this computer" } else { "another device" }
+        );
+        self.hub.update(&self.address, |s| s.owns_audio = owns).await;
+    }
+
     /// Updates OtherDevice; with no other device left, this computer is the
     /// only one again
     pub async fn refresh_other(&self) {
+        self.ownership_from_devices().await;
         let other = self.other_device().await;
         if other.is_empty() {
             self.media.set_elsewhere(false).await;
@@ -328,7 +362,23 @@ impl Switcher {
             };
             if turn_off {
                 self.media.set_elsewhere(true).await;
-                self.media.deactivate_a2dp_profile().await;
+                if !self.media.deactivate_a2dp_profile().await {
+                    // At connect the audio card shows up a moment after the
+                    // device list: try again while the audio is still elsewhere
+                    let this = self.clone();
+                    tokio::spawn(async move {
+                        for _ in 0..10 {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            let still = {
+                                let st = this.state.lock().await;
+                                st.off_for_other && !st.owned
+                            };
+                            if !still || this.media.deactivate_a2dp_profile().await {
+                                return;
+                            }
+                        }
+                    });
+                }
             }
         }
         self.hub.update(&self.address, |s| s.other_device = other).await;
