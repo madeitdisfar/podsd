@@ -50,6 +50,8 @@ struct MediaControllerState {
     i_paused_the_media: bool,
     ear_detection_enabled: bool,
     disconnect_when_not_wearing: bool,
+    /// Another device has the AirPods' audio: ear detection is its business
+    elsewhere: bool,
     conv_original_volume: Option<u32>,
     conv_conversation_started: bool,
     restart_wireplumber: bool,
@@ -69,6 +71,7 @@ impl MediaControllerState {
             i_paused_the_media: false,
             ear_detection_enabled: true,
             disconnect_when_not_wearing: false,
+            elsewhere: false,
             conv_original_volume: None,
             conv_conversation_started: false,
             restart_wireplumber: false,
@@ -89,6 +92,11 @@ impl MediaController {
         MediaController {
             state: Arc::new(Mutex::new(state)),
         }
+    }
+
+    /// Another device has the AirPods' audio (or this computer has it again)
+    pub async fn set_elsewhere(&self, elsewhere: bool) {
+        self.state.lock().await.elsewhere = elsewhere;
     }
 
     pub async fn set_options(&self, disconnect_when_not_wearing: bool, restart_wireplumber: bool) {
@@ -134,6 +142,18 @@ impl MediaController {
         old_statuses: Vec<EarDetectionStatus>,
         new_statuses: Vec<EarDetectionStatus>,
     ) {
+        // While another device has the audio, it pauses and resumes its own
+        // playback, as between Apple devices. Acting here too turned the
+        // AirPods' audio back on (they became this computer's output again)
+        // and could pause the phone through a remote player.
+        {
+            let mut state = self.state.lock().await;
+            if state.elsewhere {
+                debug!("Ear detection: another device has the audio, leaving it to it");
+                state.old_in_ear_data = new_statuses.iter().map(|s| *s == EarDetectionStatus::InEar).collect();
+                return;
+            }
+        }
         debug!(
             "Entering handle_ear_detection with old_statuses: {:?}, new_statuses: {:?}",
             old_statuses, new_statuses

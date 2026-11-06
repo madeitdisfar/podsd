@@ -40,6 +40,10 @@ struct State {
     reversed: bool,
     /// This computer owned the audio at the last report
     owned: bool,
+    /// The AirPods have reported ownership at least once
+    reported: bool,
+    /// Audio turned off here because another device has it
+    off_for_other: bool,
     /// When this computer last took them over: audio source reports right after
     /// can still name the other device, which mustn't make it give them back
     took_at: Option<Instant>,
@@ -110,6 +114,7 @@ impl Switcher {
             let r = st.reversed;
             st.reversed = false;
             st.paused_for_other = false;
+            st.off_for_other = false;
             st.took_at = Some(Instant::now());
             r
         };
@@ -121,6 +126,7 @@ impl Switcher {
             if manual { " by hand" } else { "" },
             others
         );
+        self.media.set_elsewhere(false).await;
         let players = tokio::task::spawn_blocking(playing_players_sync).await.unwrap_or_default();
         let _ = self
             .aacp
@@ -154,23 +160,28 @@ impl Switcher {
             let mut st = self.state.lock().await;
             let lost = st.owned && !owns;
             st.owned = owns;
+            st.reported = true;
             if lost {
                 st.lost_at = Some(Instant::now());
                 st.paused_for_other = true;
+                st.off_for_other = true;
             }
             lost
         };
+        if owns {
+            self.state.lock().await.off_for_other = false;
+            self.media.set_elsewhere(false).await;
+            // Given back by the AirPods themselves (the other device left or
+            // stopped): the audio profile switched off when they left comes back
+            self.media.restore_profile_if_off().await;
+        }
         if lost {
             info!("{}: another device took the AirPods", self.address);
+            self.media.set_elsewhere(true).await;
             self.media.pause_all_media().await;
             self.media.deactivate_a2dp_profile().await;
             let name = self.other_device().await;
             self.hub.emit_moved_to(&self.address, &name, false).await;
-        } else if !owns && !self.others().await.is_empty() {
-            // Connected while another device owns them: no sound here (only
-            // with another device there: alone, the AirPods may not claim
-            // ownership for this computer at all)
-            self.media.deactivate_a2dp_profile().await;
         }
         self.refresh_other().await;
     }
@@ -180,6 +191,8 @@ impl Switcher {
         {
             let mut st = self.state.lock().await;
             st.owned = false;
+            st.reported = true;
+            st.off_for_other = true;
             st.lost_at = Some(Instant::now());
             st.paused_for_other = true;
             if reversed {
@@ -190,6 +203,7 @@ impl Switcher {
             .aacp
             .send_control_command(ControlCommandIdentifiers::OwnsConnection, &[0x00])
             .await;
+        self.media.set_elsewhere(true).await;
         self.media.pause_all_media().await;
         self.media.deactivate_a2dp_profile().await;
         let name = self.device_name(sender).await;
@@ -221,8 +235,31 @@ impl Switcher {
         self.refresh_other().await;
     }
 
-    async fn refresh_other(&self) {
+    /// Updates OtherDevice; with no other device left, this computer is the
+    /// only one again
+    pub async fn refresh_other(&self) {
         let other = self.other_device().await;
+        if other.is_empty() {
+            self.media.set_elsewhere(false).await;
+        } else {
+            // Another device there and the AirPods say this computer doesn't
+            // own the audio (often at connect, where the ownership report comes
+            // before the device list): no sound here, ear detection is theirs.
+            // Only with another device there: alone, the AirPods may never
+            // claim ownership for this computer at all.
+            let turn_off = {
+                let mut st = self.state.lock().await;
+                let off = st.reported && !st.owned && !st.off_for_other;
+                if off {
+                    st.off_for_other = true;
+                }
+                off
+            };
+            if turn_off {
+                self.media.set_elsewhere(true).await;
+                self.media.deactivate_a2dp_profile().await;
+            }
+        }
         self.hub.update(&self.address, |s| s.other_device = other).await;
     }
 

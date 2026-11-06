@@ -275,6 +275,7 @@ async fn handle_event(
             hub.sync_alias(address, &info.name, false).await;
         }
         AACPEvent::ConnectedDevices(old_devices, new_devices) => {
+            switcher.refresh_other().await;
             let local_mac = hub.local_mac().to_string();
             for device in new_devices.iter().filter(|d| {
                 d.mac != local_mac && old_devices.iter().all(|o| o.mac != d.mac)
