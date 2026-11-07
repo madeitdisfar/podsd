@@ -45,8 +45,6 @@ struct State {
     reported: bool,
     /// Audio turned off here because another device has it
     off_for_other: bool,
-    /// This computer owned the audio when the last AirPod came out of an ear
-    owner_at_removal: bool,
     /// Until then, losing the audio is the AirPods' choice on reinsertion, not
     /// another device taking them: take them straight back
     reclaim_until: Option<Instant>,
@@ -309,19 +307,18 @@ impl Switcher {
     /// the audio to the other device (seen every time with an iPhone). An Apple
     /// device resumes where it paused, so podsd claims the audio again before
     /// resuming, and takes it back if the AirPods hand it away anyway.
+    /// Whatever made this computer the owner while no AirPod was in an ear
+    /// counts: owning at removal, or "Use here" with both in the case (they
+    /// handed the audio to the iPhone 1.9 s after one went in, 2026-11-08).
+    /// Another device taking them meanwhile ends the ownership, so then the
+    /// AirPods stay with it, as on Apple devices.
     pub async fn on_ear(&self, was_in: bool, any_in: bool) {
-        if was_in && !any_in {
-            let mut st = self.state.lock().await;
-            st.owner_at_removal = st.owned && !self.others().await.is_empty();
-            return;
-        }
         if was_in || !any_in {
             return;
         }
         let reclaim = {
             let mut st = self.state.lock().await;
-            let r = st.owner_at_removal;
-            st.owner_at_removal = false;
+            let r = st.owned;
             if r {
                 st.reclaim_until = Some(Instant::now() + RECLAIM_WINDOW);
             }
