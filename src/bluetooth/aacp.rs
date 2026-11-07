@@ -1290,6 +1290,21 @@ impl AACPManager {
         self.send_data_packet(&packet).await
     }
 
+    /// The hosts the AirPods should keep connected together, the playing one
+    /// first ("Connect Priority List", opcode 0x14: a count, then each address
+    /// reversed). A Mac sends it when it shares the AirPods with an iPhone;
+    /// layout from EarPort (github.com/Anoryth/earport), matching the
+    /// apple-wireshark dissector.
+    pub async fn send_priority_list(&self, hosts: &[String]) -> Result<()> {
+        let packet = priority_list_packet(hosts).ok_or_else(|| {
+            Error::from(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("bad host list {hosts:?}"),
+            ))
+        })?;
+        self.send_data_packet(&packet).await
+    }
+
     pub async fn send_some_packet(&self) -> Result<()> {
         self.send_data_packet(&[0x29, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
             .await
@@ -1354,4 +1369,40 @@ async fn send_thread(mut rx: mpsc::Receiver<Vec<u8>>, sp: Arc<SeqPacket>) {
         }
     }
     info!("Send thread finished.");
+}
+
+/// A priority list's packet (after the 04 00 04 00 header): 14 00, the count,
+/// then each address with its bytes reversed. None for a bad address.
+fn priority_list_packet(hosts: &[String]) -> Option<Vec<u8>> {
+    let mut packet = vec![0x14, 0x00, u8::try_from(hosts.len()).ok()?];
+    for host in hosts {
+        let bytes: Vec<u8> = host
+            .split(':')
+            .map(|b| u8::from_str_radix(b, 16).ok())
+            .collect::<Option<_>>()?;
+        if bytes.len() != 6 {
+            return None;
+        }
+        packet.extend(bytes.iter().rev());
+    }
+    Some(packet)
+}
+
+#[cfg(test)]
+mod priority_list_tests {
+    use super::priority_list_packet;
+
+    #[test]
+    fn matches_earports_bytes() {
+        // EarPort's own test (daemon/tests/test_aap_protocol.c, test_priority_list)
+        let hosts = ["11:22:33:44:55:66".to_string(), "aa:bb:cc:dd:ee:01".to_string()];
+        assert_eq!(
+            priority_list_packet(&hosts),
+            Some(vec![
+                0x14, 0x00, 0x02, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0x01, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA,
+            ])
+        );
+        assert_eq!(priority_list_packet(&["11:22:33:44:55".to_string()]), None);
+        assert_eq!(priority_list_packet(&["11:22:33:44:55:6g".to_string()]), None);
+    }
 }

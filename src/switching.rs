@@ -60,6 +60,14 @@ struct State {
     greeted: HashSet<String>,
     /// The audio is on standby (see standby.rs)
     standby: Option<Standby>,
+    /// The last priority list sent: the other host, and whether this computer
+    /// went first; when; and how many this session
+    listed: Option<(String, bool)>,
+    listed_at: Option<Instant>,
+    lists_sent: u8,
+    /// The other device last seen connected this session: the list names it
+    /// even while it's briefly gone or still rejoining
+    partner: Option<String>,
     /// Since when nothing has played on the AirPods (None: not since this
     /// session started, so standby comes at once)
     idle_since: Option<Instant>,
@@ -75,6 +83,15 @@ struct Standby {
     name: String,
     was_default: bool,
 }
+
+/// Device list flags (an entry's second byte; EarPort and kase read them so,
+/// and LISTED matches what podsd saw: the laptop never had it): on the
+/// AirPods' priority list, and the device they play from
+const HOST_LISTED: u8 = 0x01;
+const HOST_PLAYS: u8 = 0x02;
+/// The same priority list again only after this; at most so many a session
+const LIST_REPEAT: Duration = Duration::from_secs(2);
+const LISTS_MAX: u8 = 8;
 
 /// Standby comes after nothing has played on the AirPods this long
 const STANDBY_AFTER: Duration = Duration::from_secs(5);
@@ -152,8 +169,21 @@ impl Switcher {
         {
             let name = name.clone();
             let _ = tokio::task::spawn_blocking(move || {
+                // The stand-in must exist before it becomes the default: the
+                // shell (Quickshell) heard the new default before the output,
+                // never looked again, and showed no output selected
+                let mut stand_in = None;
+                for _ in 0..20 {
+                    stand_in = standby::Snapshot::take().find(&name);
+                    if stand_in.is_some() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                // and give clients a moment to hear of it
+                std::thread::sleep(Duration::from_millis(150));
                 // Same volume first, so switching to it changes nothing
-                let channels = standby::Snapshot::take().find(&name).map_or(2, |s| s.volume.len());
+                let channels = stand_in.map_or(2, |s| s.volume.len());
                 standby::copy_volume(&airpods, &name, channels);
                 if was_default {
                     standby::set_default(&name);
@@ -324,11 +354,69 @@ impl Switcher {
             .collect()
     }
 
+    /// Asks the AirPods to keep this computer connected alongside the other
+    /// device: their priority list, the device they play from first, as a Mac
+    /// sends it when sharing them with an iPhone. Without it the laptop was
+    /// never on the list (its entry never had HOST_LISTED), and it was the one
+    /// they dropped. Sent when another device is connected and this computer
+    /// isn't listed, or the order changed. Also when the list is forgotten:
+    /// when the main role moves to the other AirPod (one going into the case),
+    /// that AirPod doesn't know the list (the laptop's LISTED flag went away),
+    /// and the iPhone rejoining a second later dropped the laptop. So the
+    /// other device is remembered once seen connected, and the list goes out
+    /// at once even while it's away or still rejoining.
+    async fn keep_listed(&self, devices: &[ConnectedDevice]) {
+        let local = self.hub.local_mac().to_ascii_uppercase();
+        let Some(me) = devices.iter().find(|d| d.mac.to_ascii_uppercase() == local) else {
+            return;
+        };
+        let connected_other = devices
+            .iter()
+            .find(|d| d.mac.to_ascii_uppercase() != local && d.info1 == DEVICE_CONNECTED)
+            .map(|d| d.mac.clone());
+        let other = {
+            let mut st = self.state.lock().await;
+            if connected_other.is_some() {
+                st.partner = connected_other;
+            }
+            st.partner.clone()
+        };
+        let Some(other) = other else { return };
+        let mine_first = me.info2 & HOST_PLAYS != 0;
+        let key = (other.clone(), mine_first);
+        {
+            let mut st = self.state.lock().await;
+            let same = st.listed.as_ref() == Some(&key);
+            if (same && me.info2 & HOST_LISTED != 0)
+                || (same && st.listed_at.is_some_and(|t| t.elapsed() < LIST_REPEAT))
+                || st.lists_sent >= LISTS_MAX
+            {
+                return;
+            }
+            st.listed = Some(key);
+            st.listed_at = Some(Instant::now());
+            st.lists_sent += 1;
+        }
+        let local = self.hub.local_mac().to_string();
+        let hosts = if mine_first { [local, other.clone()] } else { [other.clone(), local] };
+        info!(
+            "{}: asking the AirPods to keep this computer with {} ({} first; this computer's flags {:#04x})",
+            self.address,
+            other,
+            if mine_first { "this computer" } else { "the other device" },
+            me.info2
+        );
+        if let Err(e) = self.aacp.send_priority_list(&hosts).await {
+            warn!("{}: sending the priority list failed: {}", self.address, e);
+        }
+    }
+
     /// Introduces this computer to other devices once they are connected
     /// (Android: on a new connected device, media information and "add tipi
     /// device"). One still connecting is introduced when a later list shows
     /// it connected; one that leaves is introduced again when it's back.
     pub async fn greet(&self, devices: &[ConnectedDevice]) {
+        self.keep_listed(devices).await;
         let local = self.hub.local_mac().to_ascii_uppercase();
         // Another device joining while this computer's audio stream is open
         // makes the AirPods drop this computer: close it now if it's idle
@@ -415,7 +503,14 @@ impl Switcher {
         );
         self.media.set_elsewhere(false).await;
         self.leave_standby(true).await;
-        self.state.lock().await.idle_since = Some(Instant::now());
+        {
+            // A fresh 5 s before standby: a "soon" asked for earlier (another
+            // device joining while it had them) put it on standby 1 s after
+            // Use here
+            let mut st = self.state.lock().await;
+            st.idle_since = Some(Instant::now());
+            st.standby_soon = false;
+        }
         let players = tokio::task::spawn_blocking(playing_players_sync).await.unwrap_or_default();
         let _ = self
             .aacp
