@@ -144,6 +144,19 @@ impl DeviceState {
         self.ear_primary == "in-ear" || self.ear_secondary == "in-ear"
     }
 
+    /// The state in which the AirPods let this computer go and expect it to
+    /// come back (map B21): both AirPods just came out of the ears (not into
+    /// the case) while another device has the audio. They release whichever
+    /// device doesn't own it, with "Power Off"; an iPhone reconnects 1–2 s
+    /// later.
+    pub fn released_for_other(&self) -> bool {
+        self.ready
+            && !self.owns_audio
+            && !self.other_device.is_empty()
+            && self.ear_primary == "out-of-ear"
+            && self.ear_secondary == "out-of-ear"
+    }
+
     /// Forget everything that only holds while the control channel is up.
     pub fn clear_live(&mut self) {
         self.ready = false;
@@ -215,6 +228,29 @@ mod tests {
         s.settings.insert("one-bud-anc".into(), SettingValue::Bool(one_bud_anc));
         s.settings.insert("allow-off-mode".into(), SettingValue::Bool(allow_off));
         s
+    }
+
+    #[test]
+    fn released_only_with_both_out_and_the_audio_elsewhere() {
+        let at = |primary: &str, secondary: &str, owns: bool| {
+            let mut s = pods(primary, secondary, false, false);
+            s.ready = true;
+            s.other_device = "iPhone".into();
+            s.owns_audio = owns;
+            s
+        };
+        // 2026-11-08 00:14:05: both out, the iPhone owning
+        assert!(at("out-of-ear", "out-of-ear", false).released_for_other());
+        // Owning here: the AirPods release the iPhone instead
+        assert!(!at("out-of-ear", "out-of-ear", true).released_for_other());
+        // Put away, or one still worn
+        assert!(!at("in-case", "in-case", false).released_for_other());
+        assert!(!at("out-of-ear", "in-case", false).released_for_other());
+        assert!(!at("in-ear", "out-of-ear", false).released_for_other());
+        // No other device
+        let mut alone = at("out-of-ear", "out-of-ear", false);
+        alone.other_device.clear();
+        assert!(!alone.released_for_other());
     }
 
     #[test]

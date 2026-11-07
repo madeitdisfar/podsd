@@ -51,6 +51,18 @@ struct Entry {
     lid_open: bool,
     /// While open: an advert was strong enough (caseOpenRssi) to count as near
     near: bool,
+    /// When the last connection ended, and whether the AirPods had just let
+    /// this computer go for another device (map B21)
+    ended: Option<(std::time::Instant, bool)>,
+}
+
+impl Entry {
+    /// Called as the connection ends, before its live state is cleared
+    fn note_end(&mut self) {
+        if self.state.ready {
+            self.ended = Some((std::time::Instant::now(), self.state.released_for_other()));
+        }
+    }
 }
 
 /// BlueZ passes an advert on only when it changes, so an open lid that nothing
@@ -147,6 +159,7 @@ impl Hub {
                     lids: HashMap::new(),
                     lid_open: false,
                     near: false,
+                    ended: None,
                 },
             );
             // The case's last reading, from an earlier run
@@ -453,7 +466,10 @@ impl Hub {
     pub async fn on_disconnected(&self, address: &str) {
         let session = {
             let mut devices = self.0.devices.lock().await;
-            devices.get_mut(address).and_then(|e| e.session.take())
+            devices.get_mut(address).and_then(|e| {
+                e.note_end();
+                e.session.take()
+            })
         };
         if let Some(session) = session {
             info!("{} disconnected", address);
@@ -471,13 +487,26 @@ impl Hub {
     pub async fn on_channel_closed(&self, address: &str) {
         let session = {
             let mut devices = self.0.devices.lock().await;
-            devices.get_mut(address).and_then(|e| e.session.take())
+            devices.get_mut(address).and_then(|e| {
+                e.note_end();
+                e.session.take()
+            })
         };
         if let Some(session) = session {
             info!("{}: control channel closed", address);
             session.stop().await;
         }
         self.update(address, |s| s.clear_live()).await;
+    }
+
+    /// The connection that just ended was the AirPods letting this computer
+    /// go for another device (map B21). Answers once.
+    pub async fn take_released_for_other(&self, address: &str) -> bool {
+        let mut devices = self.0.devices.lock().await;
+        let Some(entry) = devices.get_mut(address) else {
+            return false;
+        };
+        matches!(entry.ended.take(), Some((at, true)) if at.elapsed() < std::time::Duration::from_secs(5))
     }
 
     pub async fn emit_stem_press(&self, address: &str, press: &str, bud: &str) {

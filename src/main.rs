@@ -269,7 +269,46 @@ async fn log_disconnect_reasons(hub: Hub) {
         }
         let (reason, message) = msg.body().deserialize::<(String, String)>().unwrap_or_default();
         info!("{} disconnected: {} ({})", address, reason, message);
+        // The AirPods ended it ("Power Off" reads as Remote here). After a
+        // lost link (Timeout) BlueZ reconnects by itself.
+        if reason == "org.bluez.Reason.Remote" && hub.take_released_for_other(&address).await {
+            tokio::spawn(reconnect_after_release(hub.clone(), address));
+        }
     }
+}
+
+/// Both AirPods came out of the ears while another device had the audio, and
+/// the AirPods let this computer go (map B21). They do the same to an iPhone
+/// in the mirror case, and it reconnects 1–2 s later; BlueZ doesn't reconnect
+/// a link the other side ended, so podsd does, as the iPhone would. A few
+/// tries only (EarPort: 2 s, then every 5 s, 3 tries).
+async fn reconnect_after_release(hub: Hub, address: String) {
+    info!(
+        "{}: the AirPods let this computer go as both came out while another device had the audio; connecting again",
+        address
+    );
+    for (attempt, wait) in [2u64, 5, 5].into_iter().enumerate() {
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        if hub.state(&address).await.is_some_and(|s| s.connected) {
+            info!("{}: connected again", address);
+            return;
+        }
+        let Some(path) = hub.bluez_path(&address).await else {
+            return;
+        };
+        match hub
+            .system()
+            .call_method(Some("org.bluez"), path.as_str(), Some("org.bluez.Device1"), "Connect", &())
+            .await
+        {
+            Ok(_) => {
+                info!("{}: connected again (try {})", address, attempt + 1);
+                return;
+            }
+            Err(e) => info!("{}: reconnecting failed (try {}): {}", address, attempt + 1, e),
+        }
+    }
+    info!("{}: not reconnecting any more", address);
 }
 
 /// Follows BlueZ: AirPods connecting and disconnecting, and newly paired ones.
