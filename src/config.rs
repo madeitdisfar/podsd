@@ -17,9 +17,6 @@ pub struct Config {
     /// When media starts playing here with an AirPod in, ask the AirPods to switch to
     /// this computer (takes them from a phone that is using them).
     pub takeover_on_play: bool,
-    /// Close the AirPods' audio stream while nothing plays here (as a Mac
-    /// does): with it open, another device joining them drops this computer.
-    pub standby_when_idle: bool,
     /// Lower the volume while Conversation Awareness says you're speaking.
     pub conversation_volume: bool,
     /// Double press = next track, triple press = previous track, handled here.
@@ -45,7 +42,6 @@ impl Default for Config {
             ear_pause: true,
             disconnect_when_not_wearing: false,
             takeover_on_play: true,
-            standby_when_idle: true,
             conversation_volume: true,
             stem_control: false,
             restart_wireplumber: false,

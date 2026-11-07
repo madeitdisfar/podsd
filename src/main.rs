@@ -9,7 +9,6 @@ mod devices;
 mod hub;
 mod media_controller;
 mod settings;
-mod standby;
 mod state;
 mod switching;
 mod utils;
@@ -113,8 +112,6 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         if apple_id { "Apple's: automatic switching with Apple devices" } else { "not Apple's: no automatic switching" }
     );
     let hub = Hub::new(session.clone(), system.clone(), config.clone(), local_mac, apple_id);
-    // Stand-in outputs left behind by a run that didn't end cleanly
-    let _ = tokio::task::spawn_blocking(standby::remove_stale_stand_ins).await;
 
     session.object_server().at(ROOT_PATH, ObjectManager).await?;
     session.object_server().at(ROOT_PATH, ManagerIface).await?;
