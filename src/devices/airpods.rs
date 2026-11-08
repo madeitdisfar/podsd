@@ -314,6 +314,17 @@ async fn handle_event(
             hub.sync_alias(address, &info.name, false).await;
         }
         AACPEvent::ConnectedDevices(_, new_devices) => {
+            // For a drop by a device joining before this computer was listed
+            // (hub::Release::JoinedWhileUnlisted)
+            let local = hub.local_mac().to_ascii_uppercase();
+            let listed_here = new_devices
+                .iter()
+                .find(|d| d.mac.to_ascii_uppercase() == local)
+                .map(|d| d.info2 & 0x01 != 0);
+            let others = || new_devices.iter().filter(|d| d.mac.to_ascii_uppercase() != local);
+            let other_joining = others().any(|d| d.info1 == 1);
+            let other_connected = others().any(|d| d.info1 == 2);
+            hub.note_device_list(address, listed_here, other_joining, other_connected).await;
             switcher.refresh_other().await;
             switcher.greet(&new_devices).await;
         }

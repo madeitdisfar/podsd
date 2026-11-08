@@ -475,6 +475,10 @@ impl Switcher {
     /// only one again
     pub async fn refresh_other(&self) {
         self.ownership_from_devices().await;
+        // Back after the AirPods dropped this computer for a device joining to
+        // play (hub::Release::JoinedWhileUnlisted): if that device has the
+        // audio, it took the AirPods, so report the move as on_ownership would
+        let from_join = self.state.lock().await.reported && self.hub.take_back_from_join(&self.address).await;
         let other = self.other_device().await;
         if other.is_empty() {
             self.media.set_elsewhere(false).await;
@@ -493,6 +497,15 @@ impl Switcher {
                 }
                 off
             };
+            if turn_off && from_join {
+                {
+                    let mut st = self.state.lock().await;
+                    st.lost_at = Some(Instant::now());
+                    st.paused_for_other = true;
+                }
+                info!("{}: {} took the AirPods as it joined", self.address, other);
+                self.hub.emit_moved_to(&self.address, &other, false).await;
+            }
             if turn_off {
                 self.media.set_elsewhere(true).await;
                 if !self.media.deactivate_a2dp_profile().await {

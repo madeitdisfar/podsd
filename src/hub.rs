@@ -62,9 +62,20 @@ struct Entry {
     lid_open: bool,
     /// While open: an advert was strong enough (caseOpenRssi) to count as near
     near: bool,
-    /// When the last connection ended, and whether the AirPods had just let
-    /// this computer go for another device (DeviceState::released_for_other)
-    ended: Option<(std::time::Instant, bool)>,
+    /// When the last connection ended, and whether (and why) the AirPods had
+    /// just let this computer go
+    ended: Option<(std::time::Instant, Option<Release>)>,
+    /// The AirPods' last device list: this computer's entry lacked the
+    /// "listed" flag (no priority list sent yet)
+    unlisted_here: bool,
+    /// When that list last showed another device still connecting
+    joining_at: Option<std::time::Instant>,
+    /// Another device has been fully connected at some point on this link:
+    /// one joining then is rejoining (B19), not arriving to play
+    other_was_here: bool,
+    /// A reconnect after a JoinedWhileUnlisted release: the device that joined
+    /// took the audio, which the next session reports as a move
+    back_from_join: bool,
     /// When podsd started reconnecting after such releases, this last minute
     reconnects: Vec<std::time::Instant>,
     /// Control channels reopened on this link (Hub::reopen_channel)
@@ -74,18 +85,45 @@ struct Entry {
     active_round: Option<u32>,
 }
 
+/// Why the AirPods let this computer go, when they expect it back
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Release {
+    /// Another device has the audio and the main AirPod left an ear
+    /// (DeviceState::released_for_other)
+    ForOther,
+    /// This computer connected first, alone, so it was never put on the
+    /// priority list; another device joining for the first time on this link
+    /// (an iPhone picking the AirPods as its output) made the AirPods drop it
+    /// 0.2–0.4 s later (2026-11-08 13:54:06, 16:50:23). Back, the list can be
+    /// sent; the audio stays with the device that joined for it.
+    JoinedWhileUnlisted,
+}
+
+/// A join this long before the link ended counts as its cause
+const JOIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Entry {
     /// Called as the connection ends, before its live state is cleared. True
-    /// when it ended in a release (released_for_other): Reconnecting is then set along
-    /// with the clearing, since BlueZ's reason only comes a moment later and
-    /// a shell must never see the AirPods gone in between.
+    /// when it ended in a release: Reconnecting is then set along with the
+    /// clearing, since BlueZ's reason only comes a moment later and a shell
+    /// must never see the AirPods gone in between.
     fn note_end(&mut self) -> bool {
         if !self.state.ready {
             return false;
         }
-        let released = self.state.released_for_other();
-        self.ended = Some((std::time::Instant::now(), released));
-        released
+        let joined = self.joining_at.is_some_and(|t| t.elapsed() < JOIN_WINDOW);
+        let release = if self.state.released_for_other() {
+            Some(Release::ForOther)
+        } else if self.state.owns_audio && self.unlisted_here && joined && !self.other_was_here {
+            Some(Release::JoinedWhileUnlisted)
+        } else {
+            None
+        };
+        self.ended = Some((std::time::Instant::now(), release));
+        self.unlisted_here = false;
+        self.joining_at = None;
+        self.other_was_here = false;
+        release.is_some()
     }
 }
 
@@ -188,6 +226,10 @@ impl Hub {
                     reconnect_round: 0,
                     active_round: None,
                     reopens: 0,
+                    unlisted_here: false,
+                    joining_at: None,
+                    other_was_here: false,
+                    back_from_join: false,
                 },
             );
             // The case's last reading, from an earlier run
@@ -606,14 +648,14 @@ impl Hub {
     /// go for another device (released_for_other), and reconnecting is due: a new round,
     /// at most so many a minute so a release right after each reconnect can't
     /// loop. Answers once per disconnect.
-    pub async fn start_reconnect_round(&self, address: &str) -> Option<u32> {
+    pub async fn start_reconnect_round(&self, address: &str) -> Option<(u32, Release)> {
         const ROUNDS_PER_MINUTE: usize = 3;
         let mut devices = self.0.devices.lock().await;
         let entry = devices.get_mut(address)?;
-        let released = matches!(entry.ended.take(), Some((at, true)) if at.elapsed() < std::time::Duration::from_secs(5));
-        if !released {
-            return None;
-        }
+        let release = match entry.ended.take() {
+            Some((at, Some(release))) if at.elapsed() < std::time::Duration::from_secs(5) => release,
+            _ => return None,
+        };
         let now = std::time::Instant::now();
         entry.reconnects.retain(|t| now.duration_since(*t) < std::time::Duration::from_secs(60));
         if entry.reconnects.len() >= ROUNDS_PER_MINUTE {
@@ -623,7 +665,39 @@ impl Hub {
         entry.reconnects.push(now);
         entry.reconnect_round += 1;
         entry.active_round = Some(entry.reconnect_round);
-        Some(entry.reconnect_round)
+        entry.back_from_join = release == Release::JoinedWhileUnlisted;
+        Some((entry.reconnect_round, release))
+    }
+
+    /// What the AirPods' device list says about this computer and the others
+    /// (for Release::JoinedWhileUnlisted): whether this computer's entry has
+    /// the listed flag, and whether another device is still connecting.
+    pub async fn note_device_list(
+        &self,
+        address: &str,
+        listed_here: Option<bool>,
+        other_joining: bool,
+        other_connected: bool,
+    ) {
+        if let Some(e) = self.0.devices.lock().await.get_mut(address) {
+            // No entry for this computer: unknown, so not counted as unlisted
+            e.unlisted_here = listed_here == Some(false);
+            if other_joining {
+                e.joining_at = Some(std::time::Instant::now());
+            }
+            e.other_was_here |= other_connected;
+        }
+    }
+
+    /// Whether this connection follows a JoinedWhileUnlisted release. Answers
+    /// once.
+    pub async fn take_back_from_join(&self, address: &str) -> bool {
+        self.0
+            .devices
+            .lock()
+            .await
+            .get_mut(address)
+            .is_some_and(|e| std::mem::take(&mut e.back_from_join))
     }
 
     /// The reconnect round is over: clears Reconnecting, unless a newer round
@@ -658,5 +732,69 @@ impl Hub {
         for session in sessions {
             session.stop().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(owns: bool, unlisted: bool, joined_ago: Option<u64>) -> Entry {
+        let mut state = DeviceState::new("00:00:00:00:00:00", "test");
+        state.ready = true;
+        state.owns_audio = owns;
+        state.ear_primary = "in-ear".into();
+        state.ear_secondary = "in-ear".into();
+        Entry {
+            state,
+            bluez_path: String::new(),
+            session: None,
+            attaching: false,
+            lids: HashMap::new(),
+            lid_open: false,
+            near: false,
+            ended: None,
+            reconnects: Vec::new(),
+            reconnect_round: 0,
+            active_round: None,
+            reopens: 0,
+            unlisted_here: unlisted,
+            joining_at: joined_ago.map(|s| std::time::Instant::now() - std::time::Duration::from_millis(s)),
+            other_was_here: false,
+            back_from_join: false,
+        }
+    }
+
+    fn ended(mut e: Entry) -> Option<Release> {
+        e.note_end();
+        e.ended.and_then(|(_, r)| r)
+    }
+
+    #[test]
+    fn joined_while_unlisted_needs_every_condition() {
+        // 2026-11-08 16:50:23: owning, unlisted, the iPhone joining 0.4 s before
+        assert_eq!(ended(entry(true, true, Some(400))), Some(Release::JoinedWhileUnlisted));
+        // Listed: the list did its job, any drop is something else
+        assert_eq!(ended(entry(true, false, Some(400))), None);
+        // Nobody joining, or the join too long before
+        assert_eq!(ended(entry(true, true, None)), None);
+        assert_eq!(ended(entry(true, true, Some(2500))), None);
+        // Not owning: that's ForOther's case (another device has the audio)
+        assert_eq!(ended(entry(false, true, Some(400))), None);
+        // 2026-11-07 13:47:39 (B19): the iPhone had been here and rejoined
+        let mut e = entry(true, true, Some(400));
+        e.other_was_here = true;
+        assert_eq!(ended(e), None);
+        // The channel never came up
+        let mut e = entry(true, true, Some(400));
+        e.state.ready = false;
+        assert_eq!(ended(e), None);
+    }
+
+    #[test]
+    fn a_release_for_another_device_stays_its_own_kind() {
+        let mut e = entry(false, false, None);
+        e.state.other_device = "iPhone".into();
+        assert_eq!(ended(e), Some(Release::ForOther));
     }
 }

@@ -273,8 +273,8 @@ async fn log_disconnect_reasons(hub: Hub) {
         // lost link (Timeout) BlueZ reconnects by itself.
         match reason == "org.bluez.Reason.Remote" {
             true => match hub.start_reconnect_round(&address).await {
-                Some(round) => {
-                    tokio::spawn(reconnect_after_release(hub.clone(), address, round));
+                Some((round, release)) => {
+                    tokio::spawn(reconnect_after_release(hub.clone(), address, round, release));
                 }
                 None => hub.drop_unconfirmed_release(&address).await,
             },
@@ -288,11 +288,27 @@ async fn log_disconnect_reasons(hub: Hub) {
 /// same to an iPhone in the mirror case, and it reconnects 1–2 s later; BlueZ
 /// doesn't reconnect a link the other side ended, so podsd does, as the
 /// iPhone would. A few tries only (EarPort: 2 s, then every 5 s, 3 tries).
-async fn reconnect_after_release(hub: Hub, address: String, round: u32) {
-    info!(
-        "{}: the AirPods let this computer go while another device had the audio; connecting again",
-        address
-    );
+async fn reconnect_after_release(hub: Hub, address: String, round: u32, release: hub::Release) {
+    match release {
+        hub::Release::ForOther => info!(
+            "{}: the AirPods let this computer go while another device had the audio; connecting again",
+            address
+        ),
+        hub::Release::JoinedWhileUnlisted => {
+            info!(
+                "{}: the AirPods dropped this computer for a device joining before it was on their priority list; connecting again",
+                address
+            );
+            // That device took the AirPods to play: what played here stops,
+            // as when another device takes them over (Apple: the Mac pauses)
+            let paused = tokio::task::spawn_blocking(media_controller::pause_local_players_sync)
+                .await
+                .unwrap_or(0);
+            if paused > 0 {
+                info!("{}: paused {} player(s): the audio moved to the device that joined", address, paused);
+            }
+        }
+    }
     // Reconnecting was set as the connection ended (Hub::note_end)
     if reconnect(&hub, &address).await {
         // Ready (which clears Reconnecting) follows once the control channel
@@ -310,6 +326,8 @@ async fn reconnect_after_release(hub: Hub, address: String, round: u32) {
         }
     } else {
         info!("{}: not reconnecting any more", address);
+        // No session to report the move to: a later connection mustn't
+        hub.take_back_from_join(&address).await;
     }
     hub.end_reconnect_round(&address, round).await;
 }

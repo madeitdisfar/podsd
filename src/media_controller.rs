@@ -1254,3 +1254,26 @@ async fn get_sink_name_by_mac(mac: &str) -> Option<String> {
         .await
         .unwrap_or(None)
 }
+/// Pauses the players playing here (with an audio stream on this computer)
+/// and says how many. Needs no session: used as the AirPods go.
+pub fn pause_local_players_sync() -> usize {
+    let Ok(conn) = Connection::new_session() else {
+        return 0;
+    };
+    let mut paused = 0;
+    for service in MediaController::local_players(&conn) {
+        let proxy = conn.with_proxy(&service, "/org/mpris/MediaPlayer2", Duration::from_secs(2));
+        let playing = proxy
+            .get::<String>("org.mpris.MediaPlayer2.Player", "PlaybackStatus")
+            .is_ok_and(|s| s == "Playing");
+        if playing
+            && proxy
+                .method_call::<(), _, &str, &str>("org.mpris.MediaPlayer2.Player", "Pause", ())
+                .is_ok()
+        {
+            info!("Paused {}", service);
+            paused += 1;
+        }
+    }
+    paused
+}
