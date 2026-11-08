@@ -88,6 +88,7 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
     let remembered = crate::utils::load_remembered().remove(&address).unwrap_or_default();
     hub.update(&address, |s| {
         s.ready = true;
+        s.reconnecting = false;
         for (key, default) in settings::UNREPORTED {
             let value = remembered
                 .get(*key)

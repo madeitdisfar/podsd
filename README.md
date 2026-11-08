@@ -153,6 +153,7 @@ Session bus, service `io.github.madeitdisfar.Podsd`.
 | `ListeningModes` | as | the modes `SetListeningMode` takes now: Off only with `allow-off-mode`; with one bud in an ear, noise cancellation and Adaptive only with `one-bud-anc` (as on iOS) |
 | `OtherDevice` | s | the other device sharing the AirPods (`iPhone`, `iPad`, `Mac`, `another device`), `""` when none |
 | `OwnsAudio` | b | this computer has the AirPods' audio (not the phone) |
+| `Reconnecting` | b | the AirPods let this computer go for another device (both buds taken out while it had the audio) and podsd is connecting again, a few seconds; stays set across the disconnect, so a shell can keep showing the AirPods as they were. Clears once they're ready again or podsd gives up |
 | `Settings` | a{sv} | every setting the AirPods reported, by key |
 
 Methods, which return once the request is sent; the new value arrives as a property change

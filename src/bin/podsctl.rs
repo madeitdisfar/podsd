@@ -8,7 +8,7 @@
 //!     "connected":true,"ready":true,
 //!     "battery":{"left":{"level":100,"charging":true},"right":{…},"case":{…},"headphone":{…}},
 //!     "batterySource":"aacp","ear":{"primary":"in-ear","secondary":"in-case","inEar":true},
-//!     "listeningMode":"noise-cancellation","ownsAudio":true,"caseOpen":false,
+//!     "listeningMode":"noise-cancellation","ownsAudio":true,"caseOpen":false,"reconnecting":false,
 //!     "settings":{"one-bud-anc":false,…}}]}
 //!
 //! battery.case also has "live" (false: the last reading, kept while no bud is
@@ -148,6 +148,9 @@ fn device_json(props: &Props) -> Json {
         "ownsAudio": get(props, "OwnsAudio"),
         // the other device sharing the AirPods ("iPhone", …), "" when none
         "otherDevice": get(props, "OtherDevice"),
+        // podsd is getting the AirPods back after they let this computer go
+        // for another device: shells keep showing them as they were
+        "reconnecting": get(props, "Reconnecting"),
         "caseOpen": get(props, "CaseOpen"),
         "settings": get(props, "Settings"),
     })

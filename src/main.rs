@@ -287,14 +287,34 @@ async fn reconnect_after_release(hub: Hub, address: String) {
         "{}: the AirPods let this computer go as both came out while another device had the audio; connecting again",
         address
     );
+    hub.update(&address, |s| s.reconnecting = true).await;
+    if reconnect(&hub, &address).await {
+        // Ready (which clears Reconnecting) follows once the control channel
+        // is up; never leave a shell showing AirPods that didn't come back
+        for _ in 0..20 {
+            if hub.state(&address).await.is_none_or(|s| s.ready) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        info!("{}: connected again, but the AirPods didn't answer", address);
+    } else {
+        info!("{}: not reconnecting any more", address);
+    }
+    hub.update(&address, |s| s.reconnecting = false).await;
+}
+
+/// Connects again: after 2 s, then 5 s and 5 s (EarPort's timing). True once
+/// connected.
+async fn reconnect(hub: &Hub, address: &str) -> bool {
     for (attempt, wait) in [2u64, 5, 5].into_iter().enumerate() {
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-        if hub.state(&address).await.is_some_and(|s| s.connected) {
+        if hub.state(address).await.is_some_and(|s| s.connected) {
             info!("{}: connected again", address);
-            return;
+            return true;
         }
-        let Some(path) = hub.bluez_path(&address).await else {
-            return;
+        let Some(path) = hub.bluez_path(address).await else {
+            return false;
         };
         match hub
             .system()
@@ -303,12 +323,12 @@ async fn reconnect_after_release(hub: Hub, address: String) {
         {
             Ok(_) => {
                 info!("{}: connected again (try {})", address, attempt + 1);
-                return;
+                return true;
             }
             Err(e) => info!("{}: reconnecting failed (try {}): {}", address, attempt + 1, e),
         }
     }
-    info!("{}: not reconnecting any more", address);
+    false
 }
 
 /// Follows BlueZ: AirPods connecting and disconnecting, and newly paired ones.

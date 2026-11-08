@@ -69,6 +69,10 @@ pub struct DeviceState {
     /// The other device sharing the AirPods ("iPhone", "iPad", "Mac", "another
     /// device"), "" when none
     pub other_device: String,
+    /// The AirPods let this computer go for another device (map B21) and podsd
+    /// is connecting again; an iPhone does this unseen, so shells can keep
+    /// showing the AirPods meanwhile. Survives the disconnect.
+    pub reconnecting: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +206,7 @@ impl DeviceState {
             ("ListeningModes", Prop::Strs(self.listening_modes())),
             ("OwnsAudio", Prop::B(self.owns_audio)),
             ("OtherDevice", Prop::S(self.other_device.clone())),
+            ("Reconnecting", Prop::B(self.reconnecting)),
             ("Settings", Prop::Settings(self.settings.clone())),
         ]
     }

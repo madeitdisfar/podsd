@@ -186,6 +186,10 @@ impl DeviceIface {
     async fn other_device(&self) -> String {
         self.st().await.other_device
     }
+    #[zbus(property)]
+    async fn reconnecting(&self) -> bool {
+        self.st().await.reconnecting
+    }
 
     /// Takes the AirPods over from the other device (Move back, "Use here")
     async fn move_here(&self) -> fdo::Result<()> {
