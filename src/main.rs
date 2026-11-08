@@ -283,8 +283,8 @@ async fn log_disconnect_reasons(hub: Hub) {
     }
 }
 
-/// The AirPods let this computer go while another device had the audio (map
-/// B21: the main AirPod left an ear, or both were out a while). They do the
+/// The AirPods let this computer go while another device had the audio (the
+/// main AirPod left an ear, or both were out a while). They do the
 /// same to an iPhone in the mirror case, and it reconnects 1–2 s later; BlueZ
 /// doesn't reconnect a link the other side ended, so podsd does, as the
 /// iPhone would. A few tries only (EarPort: 2 s, then every 5 s, 3 tries).

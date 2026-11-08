@@ -69,7 +69,8 @@ pub struct DeviceState {
     /// The other device sharing the AirPods ("iPhone", "iPad", "Mac", "another
     /// device"), "" when none
     pub other_device: String,
-    /// The AirPods let this computer go for another device (map B21) and podsd
+    /// The AirPods let this computer go for another device (see
+    /// released_for_other) and podsd
     /// is connecting again; an iPhone does this unseen, so shells can keep
     /// showing the AirPods meanwhile. Survives the disconnect.
     pub reconnecting: bool,
@@ -149,7 +150,7 @@ impl DeviceState {
     }
 
     /// The state in which the AirPods let this computer go and expect it to
-    /// come back (map B21): another device has the audio. They release
+    /// come back: another device has the audio. They release
     /// whichever device doesn't own it ("Power Off") when the main AirPod
     /// leaves an ear, or some seconds after both are out, and an iPhone
     /// reconnects 1–2 s later. Only while an AirPod is worn or in a hand:

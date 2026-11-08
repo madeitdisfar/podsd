@@ -52,7 +52,7 @@ struct Entry {
     /// While open: an advert was strong enough (caseOpenRssi) to count as near
     near: bool,
     /// When the last connection ended, and whether the AirPods had just let
-    /// this computer go for another device (map B21)
+    /// this computer go for another device (DeviceState::released_for_other)
     ended: Option<(std::time::Instant, bool)>,
     /// When podsd started reconnecting after such releases, this last minute
     reconnects: Vec<std::time::Instant>,
@@ -63,7 +63,7 @@ struct Entry {
 
 impl Entry {
     /// Called as the connection ends, before its live state is cleared. True
-    /// when it ended in a release (map B21): Reconnecting is then set along
+    /// when it ended in a release (released_for_other): Reconnecting is then set along
     /// with the clearing, since BlueZ's reason only comes a moment later and
     /// a shell must never see the AirPods gone in between.
     fn note_end(&mut self) -> bool {
@@ -548,7 +548,7 @@ impl Hub {
     }
 
     /// The connection that just ended was the AirPods letting this computer
-    /// go for another device (map B21), and reconnecting is due: a new round,
+    /// go for another device (released_for_other), and reconnecting is due: a new round,
     /// at most so many a minute so a release right after each reconnect can't
     /// loop. Answers once per disconnect.
     pub async fn start_reconnect_round(&self, address: &str) -> Option<u32> {
