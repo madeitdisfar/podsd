@@ -73,6 +73,10 @@ struct Entry {
     /// Another device has been fully connected at some point on this link:
     /// one joining then is rejoining (B19), not arriving to play
     other_was_here: bool,
+    /// This connection's end was already noted (by the channel closing or by
+    /// BlueZ, whichever came first), and whether it was a release: the
+    /// second notice must give the same answer, not overwrite it
+    end_noted: Option<bool>,
     /// A reconnect after a JoinedWhileUnlisted release: the device that joined
     /// took the audio, which the next session reports as a move
     back_from_join: bool,
@@ -108,6 +112,12 @@ impl Entry {
     /// clearing, since BlueZ's reason only comes a moment later and a shell
     /// must never see the AirPods gone in between.
     fn note_end(&mut self) -> bool {
+        // 18:31:44: BlueZ's notice came first, after the channel's had reset
+        // the join, and overwrote "released" with "not": no Reconnecting with
+        // the clearing, and the round only started by luck of timing
+        if let Some(released) = self.end_noted {
+            return released;
+        }
         if !self.state.ready {
             return false;
         }
@@ -123,6 +133,7 @@ impl Entry {
         self.unlisted_here = false;
         self.joining_at = None;
         self.other_was_here = false;
+        self.end_noted = Some(release.is_some());
         release.is_some()
     }
 }
@@ -229,6 +240,7 @@ impl Hub {
                     unlisted_here: false,
                     joining_at: None,
                     other_was_here: false,
+                    end_noted: None,
                     back_from_join: false,
                 },
             );
@@ -542,6 +554,8 @@ impl Hub {
                 return;
             }
             entry.attaching = true;
+            // A new connection: its end is still to come
+            entry.end_noted = None;
         }
         let hub = self.clone();
         let address = address.to_string();
@@ -761,6 +775,7 @@ mod tests {
             unlisted_here: unlisted,
             joining_at: joined_ago.map(|s| std::time::Instant::now() - std::time::Duration::from_millis(s)),
             other_was_here: false,
+            end_noted: None,
             back_from_join: false,
         }
     }
@@ -789,6 +804,18 @@ mod tests {
         let mut e = entry(true, true, Some(400));
         e.state.ready = false;
         assert_eq!(ended(e), None);
+    }
+
+    #[test]
+    fn the_second_notice_of_an_end_agrees_with_the_first() {
+        let mut e = entry(true, true, Some(400));
+        assert!(e.note_end());
+        // BlueZ's notice after the channel's (or the other way round)
+        assert!(e.note_end());
+        assert_eq!(e.ended.and_then(|(_, r)| r), Some(Release::JoinedWhileUnlisted));
+        let mut quiet = entry(true, false, None);
+        assert!(!quiet.note_end());
+        assert!(!quiet.note_end());
     }
 
     #[test]
