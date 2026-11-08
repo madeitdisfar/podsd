@@ -29,6 +29,17 @@ pub struct Session {
 }
 
 impl Session {
+    /// Only the channel goes, for a new one on the same link: the audio stays
+    /// as it is, and the tasks go first so the closing isn't taken for the
+    /// link going down.
+    async fn stop_for_reopen(self) {
+        for task in self.tasks {
+            task.abort();
+        }
+        self.media.stop().await;
+        self.aacp.shutdown().await;
+    }
+
     pub async fn stop(self) {
         self.media.stop().await;
         // Don't leave the AirPods silent once nothing manages them.
@@ -56,6 +67,8 @@ struct Entry {
     ended: Option<(std::time::Instant, bool)>,
     /// When podsd started reconnecting after such releases, this last minute
     reconnects: Vec<std::time::Instant>,
+    /// Control channels reopened on this link (Hub::reopen_channel)
+    reopens: u8,
     /// Counts reconnect rounds; the one running, if any
     reconnect_round: u32,
     active_round: Option<u32>,
@@ -174,6 +187,7 @@ impl Hub {
                     reconnects: Vec::new(),
                     reconnect_round: 0,
                     active_round: None,
+                    reopens: 0,
                 },
             );
             // The case's last reading, from an earlier run
@@ -439,6 +453,44 @@ impl Hub {
     /// open or opening.
     pub async fn on_connected(&self, address: &str) {
         self.update(address, |s| s.connected = true).await;
+        self.attach(address).await;
+    }
+
+    /// The AirPods took the control channel but say nothing on it: open a new
+    /// one on the same link, at most twice per link. The state shown stays as
+    /// it is (no Ready change), so shells see the information arrive.
+    /// (Boxed: a session reopens through this, and reopening starts a session.)
+    pub fn reopen_channel(&self, address: &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let hub = self.clone();
+        let address = address.to_string();
+        Box::pin(async move { hub.reopen_channel_inner(&address).await })
+    }
+
+    async fn reopen_channel_inner(&self, address: &str) {
+        const MAX_REOPENS: u8 = 2;
+        let session = {
+            let mut devices = self.0.devices.lock().await;
+            let Some(entry) = devices.get_mut(address) else {
+                return;
+            };
+            if entry.reopens >= MAX_REOPENS {
+                info!("{}: reopened the control channel {} times already; leaving it", address, MAX_REOPENS);
+                return;
+            }
+            entry.reopens += 1;
+            entry.session.take()
+        };
+        let Some(session) = session else {
+            return;
+        };
+        session.stop_for_reopen().await;
+        if self.state(address).await.is_some_and(|s| s.connected) {
+            self.attach(address).await;
+        }
+    }
+
+    /// Opens the control channel unless it is already open or opening.
+    async fn attach(&self, address: &str) {
         {
             let mut devices = self.0.devices.lock().await;
             let Some(entry) = devices.get_mut(address) else {
@@ -488,6 +540,9 @@ impl Hub {
         if let Some(session) = session {
             info!("{} disconnected", address);
             session.stop().await;
+        }
+        if let Some(e) = self.0.devices.lock().await.get_mut(address) {
+            e.reopens = 0;
         }
         self.update(address, |s| {
             s.connected = false;

@@ -156,6 +156,24 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
         }));
     }
 
+    // Sometimes the AirPods take the channel and then never say anything on it,
+    // whatever is asked (3 times so far, the last 2026-11-08 16:56: 30 s of
+    // silence through three requests; once they dropped this computer after
+    // 76 s). A new channel on the same link answers at once.
+    {
+        let aacp = aacp.clone();
+        let hub = hub.clone();
+        let address = address.clone();
+        tasks.push(tokio::spawn(async move {
+            sleep(Duration::from_secs(7)).await;
+            if !aacp.has_heard().await {
+                info!("{}: the AirPods haven't said anything on the control channel; opening a new one", address);
+                // Reopening stops this session, and with it this task
+                tokio::spawn(async move { hub.reopen_channel(&address).await });
+            }
+        }));
+    }
+
     // Moving the AirPods between this computer and another device. Its loop
     // always runs (it tells the other device when playback here starts and
     // stops); it takes them over by itself only with takeoverOnPlay and Apple's

@@ -339,6 +339,8 @@ pub struct AACPManagerState {
     /// Other devices' kinds ("iPhone", "iPad", "Mac"), from their smart routing
     /// messages, by address
     pub device_types: HashMap<String, String>,
+    /// Anything at all came on this channel
+    pub heard: bool,
 }
 
 impl AACPManagerState {
@@ -351,6 +353,7 @@ impl AACPManagerState {
             owns: false,
             old_connected_devices: Vec::new(),
             connected_devices: Vec::new(),
+            heard: false,
             audio_source: None,
             battery_info: Vec::new(),
             conversational_awareness_status: 0,
@@ -477,6 +480,11 @@ impl AACPManager {
         !state.battery_info.is_empty() || !state.ear_detection_status.is_empty()
     }
 
+    /// Whether the AirPods have sent anything at all on this channel
+    pub async fn has_heard(&self) -> bool {
+        self.state.lock().await.heard
+    }
+
     pub async fn is_connected(&self) -> bool {
         self.state.lock().await.sender.is_some()
     }
@@ -552,6 +560,7 @@ impl AACPManager {
     }
 
     pub async fn receive_packet(&self, packet: &[u8]) {
+        self.state.lock().await.heard = true;
         if !packet.starts_with(&HEADER_BYTES) {
             debug!(
                 "Received packet does not start with expected header: {}",
