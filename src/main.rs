@@ -326,16 +326,18 @@ async fn reconnect(hub: &Hub, address: &str) -> bool {
         let Some(path) = hub.bluez_path(address).await else {
             return false;
         };
-        match hub
+        // An attempt at AirPods that went off can hang for most of a minute
+        // (50 s seen), holding Reconnecting the whole time
+        let call = hub
             .system()
-            .call_method(Some("org.bluez"), path.as_str(), Some("org.bluez.Device1"), "Connect", &())
-            .await
-        {
-            Ok(_) => {
+            .call_method(Some("org.bluez"), path.as_str(), Some("org.bluez.Device1"), "Connect", &());
+        match tokio::time::timeout(std::time::Duration::from_secs(10), call).await {
+            Ok(Ok(_)) => {
                 info!("{}: connected again (try {})", address, attempt + 1);
                 return true;
             }
-            Err(e) => info!("{}: reconnecting failed (try {}): {}", address, attempt + 1, e),
+            Ok(Err(e)) => info!("{}: reconnecting failed (try {}): {}", address, attempt + 1, e),
+            Err(_) => info!("{}: reconnecting failed (try {}): no answer in 10 s", address, attempt + 1),
         }
     }
     false

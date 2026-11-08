@@ -152,13 +152,15 @@ impl DeviceState {
     /// come back (map B21): another device has the audio. They release
     /// whichever device doesn't own it ("Power Off") when the main AirPod
     /// leaves an ear, or some seconds after both are out, and an iPhone
-    /// reconnects 1–2 s later. Not with both AirPods in the case: being put
-    /// away, they power off.
+    /// reconnects 1–2 s later. Only while an AirPod is worn or in a hand:
+    /// with both in the case they're being put away, and as the lid closes the
+    /// second reads "disconnected" before they power off (11:58:40).
     pub fn released_for_other(&self) -> bool {
+        let out = |e: &str| e == "in-ear" || e == "out-of-ear";
         self.ready
             && !self.owns_audio
             && !self.other_device.is_empty()
-            && !(self.ear_primary == "in-case" && self.ear_secondary == "in-case")
+            && (out(&self.ear_primary) || out(&self.ear_secondary))
     }
 
     /// Forget everything that only holds while the control channel is up.
@@ -253,8 +255,9 @@ mod tests {
         assert!(at("out-of-ear", "in-case", false).released_for_other());
         // Owning here: the AirPods release the iPhone instead
         assert!(!at("out-of-ear", "in-ear", true).released_for_other());
-        // Put away
+        // Put away, and the lid closing (2026-11-08 11:58:40)
         assert!(!at("in-case", "in-case", false).released_for_other());
+        assert!(!at("in-case", "disconnected", false).released_for_other());
         // No other device
         let mut alone = at("out-of-ear", "out-of-ear", false);
         alone.other_device.clear();
