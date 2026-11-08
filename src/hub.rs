@@ -54,14 +54,25 @@ struct Entry {
     /// When the last connection ended, and whether the AirPods had just let
     /// this computer go for another device (map B21)
     ended: Option<(std::time::Instant, bool)>,
+    /// When podsd started reconnecting after such releases, this last minute
+    reconnects: Vec<std::time::Instant>,
+    /// Counts reconnect rounds; the one running, if any
+    reconnect_round: u32,
+    active_round: Option<u32>,
 }
 
 impl Entry {
-    /// Called as the connection ends, before its live state is cleared
-    fn note_end(&mut self) {
-        if self.state.ready {
-            self.ended = Some((std::time::Instant::now(), self.state.released_for_other()));
+    /// Called as the connection ends, before its live state is cleared. True
+    /// when it ended in a release (map B21): Reconnecting is then set along
+    /// with the clearing, since BlueZ's reason only comes a moment later and
+    /// a shell must never see the AirPods gone in between.
+    fn note_end(&mut self) -> bool {
+        if !self.state.ready {
+            return false;
         }
+        let released = self.state.released_for_other();
+        self.ended = Some((std::time::Instant::now(), released));
+        released
     }
 }
 
@@ -160,6 +171,9 @@ impl Hub {
                     lid_open: false,
                     near: false,
                     ended: None,
+                    reconnects: Vec::new(),
+                    reconnect_round: 0,
+                    active_round: None,
                 },
             );
             // The case's last reading, from an earlier run
@@ -464,12 +478,12 @@ impl Hub {
 
     /// BlueZ disconnected the device.
     pub async fn on_disconnected(&self, address: &str) {
-        let session = {
+        let (session, released) = {
             let mut devices = self.0.devices.lock().await;
-            devices.get_mut(address).and_then(|e| {
-                e.note_end();
-                e.session.take()
-            })
+            match devices.get_mut(address) {
+                Some(e) => (e.session.take(), e.note_end()),
+                None => (None, false),
+            }
         };
         if let Some(session) = session {
             info!("{} disconnected", address);
@@ -478,35 +492,98 @@ impl Hub {
         self.update(address, |s| {
             s.connected = false;
             s.clear_live();
+            s.reconnecting |= released;
         })
         .await;
+        if released {
+            self.expire_unconfirmed_release(address);
+        }
     }
 
     /// The control channel closed while BlueZ may still have the device connected.
     /// Must not run on one of the session's own tasks: stopping the session aborts them.
     pub async fn on_channel_closed(&self, address: &str) {
-        let session = {
+        let (session, released) = {
             let mut devices = self.0.devices.lock().await;
-            devices.get_mut(address).and_then(|e| {
-                e.note_end();
-                e.session.take()
-            })
+            match devices.get_mut(address) {
+                Some(e) => (e.session.take(), e.note_end()),
+                None => (None, false),
+            }
         };
         if let Some(session) = session {
             info!("{}: control channel closed", address);
             session.stop().await;
         }
-        self.update(address, |s| s.clear_live()).await;
+        self.update(address, |s| {
+            s.clear_live();
+            s.reconnecting |= released;
+        })
+        .await;
+        if released {
+            self.expire_unconfirmed_release(address);
+        }
+    }
+
+    /// Reconnecting set as the connection ended, but no reconnect round began
+    /// (BlueZ gave another reason, or none came): clear it after a moment.
+    fn expire_unconfirmed_release(&self, address: &str) {
+        let hub = self.clone();
+        let address = address.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            hub.drop_unconfirmed_release(&address).await;
+        });
+    }
+
+    /// The connection ended for another reason than a release: no reconnect
+    /// is coming, so clear Reconnecting unless a round is running.
+    pub async fn drop_unconfirmed_release(&self, address: &str) {
+        let idle = self.0.devices.lock().await.get_mut(address).is_some_and(|e| {
+            e.ended = None;
+            e.active_round.is_none()
+        });
+        if idle {
+            self.update(address, |s| s.reconnecting = false).await;
+        }
     }
 
     /// The connection that just ended was the AirPods letting this computer
-    /// go for another device (map B21). Answers once.
-    pub async fn take_released_for_other(&self, address: &str) -> bool {
+    /// go for another device (map B21), and reconnecting is due: a new round,
+    /// at most so many a minute so a release right after each reconnect can't
+    /// loop. Answers once per disconnect.
+    pub async fn start_reconnect_round(&self, address: &str) -> Option<u32> {
+        const ROUNDS_PER_MINUTE: usize = 3;
         let mut devices = self.0.devices.lock().await;
-        let Some(entry) = devices.get_mut(address) else {
-            return false;
-        };
-        matches!(entry.ended.take(), Some((at, true)) if at.elapsed() < std::time::Duration::from_secs(5))
+        let entry = devices.get_mut(address)?;
+        let released = matches!(entry.ended.take(), Some((at, true)) if at.elapsed() < std::time::Duration::from_secs(5));
+        if !released {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        entry.reconnects.retain(|t| now.duration_since(*t) < std::time::Duration::from_secs(60));
+        if entry.reconnects.len() >= ROUNDS_PER_MINUTE {
+            info!("{}: released again, but reconnected {} times this minute already; leaving it", address, ROUNDS_PER_MINUTE);
+            return None;
+        }
+        entry.reconnects.push(now);
+        entry.reconnect_round += 1;
+        entry.active_round = Some(entry.reconnect_round);
+        Some(entry.reconnect_round)
+    }
+
+    /// The reconnect round is over: clears Reconnecting, unless a newer round
+    /// has begun since.
+    pub async fn end_reconnect_round(&self, address: &str, round: u32) {
+        let latest = self.0.devices.lock().await.get_mut(address).is_some_and(|e| {
+            let latest = e.active_round == Some(round);
+            if latest {
+                e.active_round = None;
+            }
+            latest
+        });
+        if latest {
+            self.update(address, |s| s.reconnecting = false).await;
+        }
     }
 
     pub async fn emit_stem_press(&self, address: &str, press: &str, bud: &str) {

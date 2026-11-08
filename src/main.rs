@@ -271,37 +271,47 @@ async fn log_disconnect_reasons(hub: Hub) {
         info!("{} disconnected: {} ({})", address, reason, message);
         // The AirPods ended it ("Power Off" reads as Remote here). After a
         // lost link (Timeout) BlueZ reconnects by itself.
-        if reason == "org.bluez.Reason.Remote" && hub.take_released_for_other(&address).await {
-            tokio::spawn(reconnect_after_release(hub.clone(), address));
+        match reason == "org.bluez.Reason.Remote" {
+            true => match hub.start_reconnect_round(&address).await {
+                Some(round) => {
+                    tokio::spawn(reconnect_after_release(hub.clone(), address, round));
+                }
+                None => hub.drop_unconfirmed_release(&address).await,
+            },
+            false => hub.drop_unconfirmed_release(&address).await,
         }
     }
 }
 
-/// Both AirPods came out of the ears while another device had the audio, and
-/// the AirPods let this computer go (map B21). They do the same to an iPhone
-/// in the mirror case, and it reconnects 1–2 s later; BlueZ doesn't reconnect
-/// a link the other side ended, so podsd does, as the iPhone would. A few
-/// tries only (EarPort: 2 s, then every 5 s, 3 tries).
-async fn reconnect_after_release(hub: Hub, address: String) {
+/// The AirPods let this computer go while another device had the audio (map
+/// B21: the main AirPod left an ear, or both were out a while). They do the
+/// same to an iPhone in the mirror case, and it reconnects 1–2 s later; BlueZ
+/// doesn't reconnect a link the other side ended, so podsd does, as the
+/// iPhone would. A few tries only (EarPort: 2 s, then every 5 s, 3 tries).
+async fn reconnect_after_release(hub: Hub, address: String, round: u32) {
     info!(
-        "{}: the AirPods let this computer go as both came out while another device had the audio; connecting again",
+        "{}: the AirPods let this computer go while another device had the audio; connecting again",
         address
     );
-    hub.update(&address, |s| s.reconnecting = true).await;
+    // Reconnecting was set as the connection ended (Hub::note_end)
     if reconnect(&hub, &address).await {
         // Ready (which clears Reconnecting) follows once the control channel
         // is up; never leave a shell showing AirPods that didn't come back
+        let mut answered = false;
         for _ in 0..20 {
             if hub.state(&address).await.is_none_or(|s| s.ready) {
-                return;
+                answered = true;
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         }
-        info!("{}: connected again, but the AirPods didn't answer", address);
+        if !answered {
+            info!("{}: connected again, but the AirPods didn't answer", address);
+        }
     } else {
         info!("{}: not reconnecting any more", address);
     }
-    hub.update(&address, |s| s.reconnecting = false).await;
+    hub.end_reconnect_round(&address, round).await;
 }
 
 /// Connects again: after 2 s, then 5 s and 5 s (EarPort's timing). True once

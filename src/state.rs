@@ -149,16 +149,16 @@ impl DeviceState {
     }
 
     /// The state in which the AirPods let this computer go and expect it to
-    /// come back (map B21): both AirPods just came out of the ears (not into
-    /// the case) while another device has the audio. They release whichever
-    /// device doesn't own it, with "Power Off"; an iPhone reconnects 1–2 s
-    /// later.
+    /// come back (map B21): another device has the audio. They release
+    /// whichever device doesn't own it ("Power Off") when the main AirPod
+    /// leaves an ear, or some seconds after both are out, and an iPhone
+    /// reconnects 1–2 s later. Not with both AirPods in the case: being put
+    /// away, they power off.
     pub fn released_for_other(&self) -> bool {
         self.ready
             && !self.owns_audio
             && !self.other_device.is_empty()
-            && self.ear_primary == "out-of-ear"
-            && self.ear_secondary == "out-of-ear"
+            && !(self.ear_primary == "in-case" && self.ear_secondary == "in-case")
     }
 
     /// Forget everything that only holds while the control channel is up.
@@ -246,12 +246,15 @@ mod tests {
         };
         // 2026-11-08 00:14:05: both out, the iPhone owning
         assert!(at("out-of-ear", "out-of-ear", false).released_for_other());
+        // 11:38:11: the main AirPod out, the other still worn (the report
+        // still shows the main role where it was)
+        assert!(at("out-of-ear", "in-ear", false).released_for_other());
+        // A bud into the case while the other is out or worn
+        assert!(at("out-of-ear", "in-case", false).released_for_other());
         // Owning here: the AirPods release the iPhone instead
-        assert!(!at("out-of-ear", "out-of-ear", true).released_for_other());
-        // Put away, or one still worn
+        assert!(!at("out-of-ear", "in-ear", true).released_for_other());
+        // Put away
         assert!(!at("in-case", "in-case", false).released_for_other());
-        assert!(!at("out-of-ear", "in-case", false).released_for_other());
-        assert!(!at("in-ear", "out-of-ear", false).released_for_other());
         // No other device
         let mut alone = at("out-of-ear", "out-of-ear", false);
         alone.other_device.clear();
