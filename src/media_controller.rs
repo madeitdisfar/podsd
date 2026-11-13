@@ -110,6 +110,12 @@ impl MediaController {
         self.state.lock().await.self_action_at = Some(std::time::Instant::now());
     }
 
+    /// Ear detection paused players here and will resume them when the buds
+    /// are back in
+    pub async fn paused_for_resume(&self) -> bool {
+        !self.state.lock().await.paused_by_app_services.is_empty()
+    }
+
     /// Playback here was started by hand (or another device took the audio):
     /// what ear detection paused is no longer for it to resume, or a bud
     /// going back in would start a player paused by hand since

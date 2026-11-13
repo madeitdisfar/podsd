@@ -32,9 +32,8 @@ const POLL: Duration = Duration::from_millis(500);
 struct State {
     /// Audio was playing here at the last check
     was_active: bool,
-    /// Whether this computer streams to the AirPods (owns their audio, and
-    /// audio plays here), as last told to the other devices or let pass
-    /// untold as podsd's own doing
+    /// Whether this computer streams to the AirPods (Switcher::streaming), as
+    /// last told to the other devices
     told_streaming: bool,
     /// When this computer last lost the AirPods
     lost_at: Option<Instant>,
@@ -226,11 +225,11 @@ impl Switcher {
         };
         let local_mac = self.hub.local_mac().to_string();
         // A device rejoining while this computer played heard "not streaming"
-        // and took the audio 0.25-0.65 s later (4 of 4 times, 2026-11-11/12)
-        let streaming = {
-            let st = self.state.lock().await;
-            st.owned && st.was_active
-        };
+        // and took the audio 0.25-0.65 s later (4 of 4 times, 2026-11-11/12;
+        // and 11-13 19:58:53, when the greeting went by the pause ear
+        // detection had just made)
+        let was_active = self.state.lock().await.was_active;
+        let streaming = self.streaming(was_active).await;
         for mac in new {
             info!("New device on the AirPods: {}, sending media info (streaming here: {})", mac, streaming);
             if let Err(e) = self.aacp.send_media_information_new_device(&local_mac, &mac, streaming).await {
@@ -240,6 +239,15 @@ impl Switcher {
                 error!("Failed to send add tipi device: {}", e);
             }
         }
+    }
+
+    /// Whether this computer streams to the AirPods, as the other devices are
+    /// told: it owns their audio, and audio plays here or ear detection paused
+    /// it to resume (as a Mac paused by ear detection: the bud going back in
+    /// resumes it, so the other device mustn't take them meanwhile)
+    async fn streaming(&self, active: bool) -> bool {
+        let owned = self.state.lock().await.owned;
+        owned && (active || self.media.paused_for_resume().await)
     }
 
     /// The kind of another device ("iPhone", …), for clients
@@ -570,29 +578,25 @@ impl Switcher {
         loop {
             tokio::time::sleep(POLL).await;
             let active = tokio::task::spawn_blocking(local_audio_active_sync).await.unwrap_or(false);
-            let (started, streaming, changed, blocked) = {
+            let (started, blocked) = {
                 let mut st = self.state.lock().await;
                 let started = active && !st.was_active;
                 st.was_active = active;
-                // Only audio played to the AirPods counts: sound on the
-                // speakers while another device owns them isn't this
-                // computer streaming to them
-                let streaming = active && st.owned;
-                let changed = streaming != st.told_streaming;
                 let recently_lost = st.lost_at.is_some_and(|t| t.elapsed() < LOST_GRACE);
-                (started, streaming, changed, recently_lost)
+                (started, recently_lost)
             };
-            // Changes podsd made itself (ear detection) aren't the user's: the
-            // other devices keep taking this computer for the one playing, as
-            // a Mac paused by ear detection resumes when a bud goes back in
-            if changed {
-                self.state.lock().await.told_streaming = streaming;
-            }
+            // Right after podsd paused or resumed by itself, the players are
+            // still on their way: no news to tell yet
             let own_doing = self.media.recent_self_action(Duration::from_secs(2)).await;
             if started && !own_doing {
                 self.media.forget_paused().await;
             }
+            // Only audio played to the AirPods counts: sound on the speakers
+            // while another device owns them isn't this computer streaming
+            let streaming = self.streaming(active).await;
+            let changed = streaming != self.state.lock().await.told_streaming;
             if changed && !own_doing {
+                self.state.lock().await.told_streaming = streaming;
                 let local = self.hub.local_mac().to_string();
                 for other in self.reachable_others().await {
                     if let Err(e) = self.aacp.send_media_information(&local, &other, streaming).await {
