@@ -111,6 +111,10 @@ impl Switcher {
         }
     }
 
+    pub fn aacp(&self) -> &AACPManager {
+        &self.aacp
+    }
+
     /// The other devices on the AirPods, connected or connecting (connected
     /// devices report, minus this computer and entries marked disconnected)
     async fn others(&self) -> Vec<String> {
