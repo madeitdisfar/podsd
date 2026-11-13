@@ -62,6 +62,8 @@ struct Entry {
     lid_open: bool,
     /// While open: an advert was strong enough (caseOpenRssi) to count as near
     near: bool,
+    /// When this opening of the lid last asked BlueZ to connect
+    lid_connect_at: Option<std::time::Instant>,
     /// When the last connection ended, and whether (and why) the AirPods had
     /// just let this computer go
     ended: Option<(std::time::Instant, Option<Release>)>,
@@ -321,6 +323,7 @@ impl Hub {
                     lids: HashMap::new(),
                     lid_open: false,
                     near: false,
+                    lid_connect_at: None,
                     ended: None,
                     reconnects: Vec::new(),
                     reconnect_round: 0,
@@ -411,7 +414,7 @@ impl Hub {
         // the first advert after opening can be weak, and later ones only repeat
         // it. Once near, it stays near until the lid closes, so the signal
         // strength wobbling around the threshold doesn't close the card.
-        let (news, open) = {
+        let (news, open, connect) = {
             let mut devices = self.0.devices.lock().await;
             let Some(entry) = devices.get_mut(address) else {
                 return;
@@ -430,7 +433,23 @@ impl Hub {
                 entry.lid_open = false;
             }
             entry.near = entry.lid_open && (entry.near || strong);
-            (news, entry.lid_open && entry.near)
+            let open = entry.lid_open && entry.near;
+            // Once per opening of the lid, again after 10 s if that didn't
+            // connect (the AirPods may have been busy). Without Apple's
+            // Device ID the AirPods take one host at a time, so only while
+            // they're free; with it they keep this computer alongside the
+            // iPhone, which often connects first (11-13 23:13:35, 4 s after
+            // the lid opened, before it read as open here): connect anyway.
+            let may_join = advert.connection == 0x00 || self.0.apple_id;
+            let due = entry.lid_connect_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(10));
+            let connect = config.auto_connect && open && may_join && !entry.state.connected && due;
+            if connect {
+                entry.lid_connect_at = Some(std::time::Instant::now());
+            }
+            if !open {
+                entry.lid_connect_at = None;
+            }
+            (news, open, connect)
         };
         debug!(
             "Advert {} from {}: lid {:02x} status {:02x} connection {:02x} rssi {:?} news {:?} -> open {} | L {:?} R {:?} C {:?}",
@@ -438,7 +457,6 @@ impl Hub {
             advert.left, advert.right, advert.case
         );
 
-        let connected = self.state(address).await.is_some_and(|s| s.connected);
         let reading = |p: Option<(i32, bool)>| {
             p.map(|(l, c)| crate::state::Battery::reading(l, c))
                 .unwrap_or_default()
@@ -459,8 +477,8 @@ impl Hub {
         if let Some((level, _)) = advert.case {
             crate::utils::save_case_battery(address, level, crate::state::now());
         }
-        if config.auto_connect && open && !connected && advert.connection == 0x00 {
-            info!("{}: lid open and free, connecting", address);
+        if connect {
+            info!("{}: lid open, connecting", address);
             if let Some(path) = self.bluez_path(address).await {
                 let system = self.0.system.clone();
                 tokio::spawn(async move {
@@ -966,6 +984,7 @@ mod tests {
             lids: HashMap::new(),
             lid_open: false,
             near: false,
+            lid_connect_at: None,
             ended: None,
             reconnects: Vec::new(),
             reconnect_round: 0,
