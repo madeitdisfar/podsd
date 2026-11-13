@@ -526,26 +526,29 @@ impl Switcher {
             }
             if turn_off {
                 self.media.set_elsewhere(true).await;
-                if !self.media.deactivate_a2dp_profile().await {
-                    // At connect the audio card shows up a moment after the
-                    // device list: try again while the audio is still elsewhere
-                    let this = self.clone();
-                    tokio::spawn(async move {
-                        for _ in 0..10 {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                            let still = {
-                                let st = this.state.lock().await;
-                                st.off_for_other && !st.owned
-                            };
-                            if !still || this.media.deactivate_a2dp_profile().await {
-                                return;
-                            }
-                        }
-                    });
-                }
+                // At connect the audio card can still be missing: on_card
+                // turns it off once it's there
+                let _ = self.media.deactivate_a2dp_profile().await;
             }
         }
         self.hub.update(&self.address, |s| s.other_device = other).await;
+    }
+
+    /// The AirPods' audio card is there (at connect it comes a moment after
+    /// the control channel): its profile as the audio's owner wants it. Off
+    /// while another device has the audio; otherwise on, as WirePlumber
+    /// remembers the "off" podsd set last time, and the AirPods connecting
+    /// alone and worn then played nothing here.
+    pub async fn on_card(&self) {
+        let elsewhere = {
+            let st = self.state.lock().await;
+            st.off_for_other && !st.owned
+        };
+        if elsewhere {
+            let _ = self.media.deactivate_a2dp_profile().await;
+        } else {
+            self.media.restore_profile_if_off().await;
+        }
     }
 
     /// Follows local playback: tells the other devices when it starts and stops,

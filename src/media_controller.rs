@@ -597,25 +597,30 @@ impl MediaController {
     }
 
     async fn get_audio_device_index(&self, mac: &str) -> Option<u32> {
-        if mac.is_empty() {
-            return None;
+        let index = card_index(mac).await;
+        match index {
+            Some(i) => info!("Found audio device index for MAC {}: {}", mac, i),
+            None => error!("No matching Bluetooth card found for MAC address: {}", mac),
         }
-        let mac_clone = mac.to_string();
+        index
+    }
 
-        tokio::task::spawn_blocking(move || {
-            for card in get_card_info_list_sync() {
-                if let Some(device_string) = card.proplist.get_str("device.string")
-                    && device_string.contains(&mac_clone)
-                {
-                    info!("Found audio device index for MAC {}: {}", mac_clone, card.index);
-                    return Some(card.index);
-                }
+    /// Waits for the AirPods' audio card: right after connecting, it comes a
+    /// moment after the control channel (or never, with audio off in BlueZ).
+    /// Whether it's there.
+    pub async fn wait_for_card(&self, limit: Duration) -> bool {
+        let mac = self.state.lock().await.connected_device_mac.clone();
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(index) = card_index(&mac).await {
+                self.state.lock().await.device_index = Some(index);
+                return true;
             }
-            error!("No matching Bluetooth card found for MAC address: {}", mac_clone);
-            None
-        })
-            .await
-            .unwrap_or(None)
+            if start.elapsed() >= limit {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     }
 
     /// Switches the AirPods' audio profile off. Returns whether it did (false
@@ -1101,6 +1106,22 @@ fn descends_from(mut pid: u32, ancestor: u32) -> bool {
         pid = ppid;
     }
     false
+}
+
+/// The audio card of the Bluetooth device with this address
+async fn card_index(mac: &str) -> Option<u32> {
+    if mac.is_empty() {
+        return None;
+    }
+    let mac = mac.to_string();
+    tokio::task::spawn_blocking(move || {
+        get_card_info_list_sync()
+            .into_iter()
+            .find(|card| card.proplist.get_str("device.string").is_some_and(|d| d.contains(&mac)))
+            .map(|card| card.index)
+    })
+    .await
+    .unwrap_or(None)
 }
 
 fn active_profile_sync(card_index: u32) -> Option<String> {

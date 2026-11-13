@@ -105,7 +105,6 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
     media
         .set_options(config.disconnect_when_not_wearing, config.restart_wireplumber)
         .await;
-    media.restore_profile_if_off().await;
 
     let mut tasks = Vec::new();
 
@@ -180,6 +179,20 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
     // Device ID.
     let switcher = Switcher::new(hub.clone(), address.clone(), aacp.clone(), media.clone());
     tasks.push(tokio::spawn(switcher.clone().run(config.takeover_on_play, hub.apple_id())));
+
+    // The audio profile, once the AirPods' audio card is there
+    {
+        let media = media.clone();
+        let switcher = switcher.clone();
+        let address = address.clone();
+        tasks.push(tokio::spawn(async move {
+            if media.wait_for_card(Duration::from_secs(30)).await {
+                switcher.on_card().await;
+            } else {
+                info!("{}: no audio card for the AirPods after 30 s", address);
+            }
+        }));
+    }
 
     {
         let hub = hub.clone();
