@@ -77,6 +77,11 @@ struct Entry {
     /// BlueZ, whichever came first), and whether it was a release: the
     /// second notice must give the same answer, not overwrite it
     end_noted: Option<bool>,
+    /// BlueZ's reason for the end (true: the AirPods ended it), when it came
+    /// before the end was noted
+    reason: Option<(std::time::Instant, bool)>,
+    /// Whether to reconnect was decided for this end (and a round started)
+    settled: Option<bool>,
     /// A reconnect after a JoinedWhileUnlisted release: the device that joined
     /// took the audio, which the next session reports as a move
     back_from_join: bool,
@@ -119,6 +124,7 @@ impl Entry {
             return released;
         }
         if !self.state.ready {
+            self.end_noted = Some(false);
             return false;
         }
         let joined = self.joining_at.is_some_and(|t| t.elapsed() < JOIN_WINDOW);
@@ -136,7 +142,86 @@ impl Entry {
         self.end_noted = Some(release.is_some());
         release.is_some()
     }
+
+    /// The end noted as the channel closes or BlueZ reports the link gone
+    fn noted_end(&mut self) -> End {
+        let released = self.note_end();
+        if let Some(reconnecting) = self.settled {
+            return End { reconnecting, decision: None, waiting: false };
+        }
+        match self.reason.take().filter(|(at, _)| at.elapsed() < REASON_WAIT) {
+            Some((_, remote)) => {
+                let decision = self.decide(remote);
+                End { reconnecting: decision.is_some(), decision: Some(decision), waiting: false }
+            }
+            // Reconnecting shows from now if it's a release: BlueZ's reason
+            // only comes a moment later, and shells mustn't see them gone
+            None => End { reconnecting: released, decision: None, waiting: released },
+        }
+    }
+
+    /// BlueZ's reason came. It can come before the end is noted (it arrives
+    /// apart from the Connected change, which podsd follows only after reading
+    /// the device's properties, and the channel's closing can wait behind
+    /// events): then it's kept and decides once the end is noted. Some
+    /// decision once both are known.
+    fn reason_came(&mut self, remote: bool) -> Option<Option<(u32, Release)>> {
+        if self.end_noted.is_none() {
+            self.reason = Some((std::time::Instant::now(), remote));
+            return None;
+        }
+        if self.settled.is_some() {
+            return None;
+        }
+        Some(self.decide(remote))
+    }
+
+    /// Whether to reconnect, now the end and BlueZ's reason are both known:
+    /// only when the AirPods ended the link in a release, and at most so many
+    /// rounds a minute so a release right after each reconnect can't loop.
+    /// A new round's number and the release.
+    fn decide(&mut self, remote: bool) -> Option<(u32, Release)> {
+        let decision = self.decide_inner(remote);
+        self.settled = Some(decision.is_some());
+        decision
+    }
+
+    fn decide_inner(&mut self, remote: bool) -> Option<(u32, Release)> {
+        const ROUNDS_PER_MINUTE: usize = 3;
+        let release = match self.ended.take() {
+            Some((at, Some(release))) if remote && at.elapsed() < REASON_WAIT => release,
+            _ => return None,
+        };
+        let now = std::time::Instant::now();
+        self.reconnects.retain(|t| now.duration_since(*t) < std::time::Duration::from_secs(60));
+        if self.reconnects.len() >= ROUNDS_PER_MINUTE {
+            info!(
+                "{}: released again, but reconnected {} times this minute already; leaving it",
+                self.state.address, ROUNDS_PER_MINUTE
+            );
+            return None;
+        }
+        self.reconnects.push(now);
+        self.reconnect_round += 1;
+        self.active_round = Some(self.reconnect_round);
+        self.back_from_join = release == Release::JoinedWhileUnlisted;
+        Some((self.reconnect_round, release))
+    }
 }
+
+/// A connection's end as noted (Entry::noted_end)
+struct End {
+    /// Reconnecting shows along with the state being cleared
+    reconnecting: bool,
+    /// Whether to reconnect, if decided just now
+    decision: Option<Option<(u32, Release)>>,
+    /// A release, with BlueZ's reason still to come
+    waiting: bool,
+}
+
+/// The end of a connection and BlueZ's reason for it count together this
+/// long apart at most
+const REASON_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// BlueZ passes an advert on only when it changes, so an open lid that nothing
 /// happens to can be quiet for a minute (41 s seen); closing it sends its own
@@ -241,6 +326,8 @@ impl Hub {
                     joining_at: None,
                     other_was_here: false,
                     end_noted: None,
+                    reason: None,
+                    settled: None,
                     back_from_join: false,
                 },
             );
@@ -556,6 +643,8 @@ impl Hub {
             entry.attaching = true;
             // A new connection: its end is still to come
             entry.end_noted = None;
+            entry.reason = None;
+            entry.settled = None;
         }
         let hub = self.clone();
         let address = address.to_string();
@@ -586,11 +675,11 @@ impl Hub {
 
     /// BlueZ disconnected the device.
     pub async fn on_disconnected(&self, address: &str) {
-        let (session, released) = {
+        let (session, end) = {
             let mut devices = self.0.devices.lock().await;
             match devices.get_mut(address) {
-                Some(e) => (e.session.take(), e.note_end()),
-                None => (None, false),
+                Some(e) => (e.session.take(), e.noted_end()),
+                None => (None, End { reconnecting: false, decision: None, waiting: false }),
             }
         };
         if let Some(session) = session {
@@ -603,22 +692,20 @@ impl Hub {
         self.update(address, |s| {
             s.connected = false;
             s.clear_live();
-            s.reconnecting |= released;
+            s.reconnecting |= end.reconnecting;
         })
         .await;
-        if released {
-            self.expire_unconfirmed_release(address);
-        }
+        self.after_end(address, end).await;
     }
 
     /// The control channel closed while BlueZ may still have the device connected.
     /// Must not run on one of the session's own tasks: stopping the session aborts them.
     pub async fn on_channel_closed(&self, address: &str) {
-        let (session, released) = {
+        let (session, end) = {
             let mut devices = self.0.devices.lock().await;
             match devices.get_mut(address) {
-                Some(e) => (e.session.take(), e.note_end()),
-                None => (None, false),
+                Some(e) => (e.session.take(), e.noted_end()),
+                None => (None, End { reconnecting: false, decision: None, waiting: false }),
             }
         };
         if let Some(session) = session {
@@ -627,60 +714,59 @@ impl Hub {
         }
         self.update(address, |s| {
             s.clear_live();
-            s.reconnecting |= released;
+            s.reconnecting |= end.reconnecting;
         })
         .await;
-        if released {
-            self.expire_unconfirmed_release(address);
+        self.after_end(address, end).await;
+    }
+
+    /// BlueZ's reason for the end of a connection (Device1.Disconnected);
+    /// `remote`: the AirPods ended it ("Power Off" reads as Remote). After a
+    /// lost link (Timeout) BlueZ reconnects by itself.
+    pub async fn on_disconnect_reason(&self, address: &str, remote: bool) {
+        let decision = self.0.devices.lock().await.get_mut(address).and_then(|e| e.reason_came(remote));
+        if let Some(decision) = decision {
+            self.act_on(address, decision).await;
         }
     }
 
-    /// Reconnecting set as the connection ended, but no reconnect round began
-    /// (BlueZ gave another reason, or none came): clear it after a moment.
-    fn expire_unconfirmed_release(&self, address: &str) {
-        let hub = self.clone();
-        let address = address.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            hub.drop_unconfirmed_release(&address).await;
-        });
-    }
-
-    /// The connection ended for another reason than a release: no reconnect
-    /// is coming, so clear Reconnecting unless a round is running.
-    pub async fn drop_unconfirmed_release(&self, address: &str) {
-        let idle = self.0.devices.lock().await.get_mut(address).is_some_and(|e| {
-            e.ended = None;
-            e.active_round.is_none()
-        });
-        if idle {
-            self.update(address, |s| s.reconnecting = false).await;
+    async fn after_end(&self, address: &str, end: End) {
+        match end.decision {
+            Some(decision) => self.act_on(address, decision).await,
+            // Reconnecting was set and BlueZ's reason is still to come: if it
+            // never does (the channel closed alone), don't leave it on
+            None if end.waiting => {
+                let hub = self.clone();
+                let address = address.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let idle = hub.0.devices.lock().await.get_mut(&address).is_some_and(|e| {
+                        e.ended = None;
+                        e.active_round.is_none()
+                    });
+                    if idle {
+                        hub.update(&address, |s| s.reconnecting = false).await;
+                    }
+                });
+            }
+            None => {}
         }
     }
 
-    /// The connection that just ended was the AirPods letting this computer
-    /// go for another device (released_for_other), and reconnecting is due: a new round,
-    /// at most so many a minute so a release right after each reconnect can't
-    /// loop. Answers once per disconnect.
-    pub async fn start_reconnect_round(&self, address: &str) -> Option<(u32, Release)> {
-        const ROUNDS_PER_MINUTE: usize = 3;
-        let mut devices = self.0.devices.lock().await;
-        let entry = devices.get_mut(address)?;
-        let release = match entry.ended.take() {
-            Some((at, Some(release))) if at.elapsed() < std::time::Duration::from_secs(5) => release,
-            _ => return None,
-        };
-        let now = std::time::Instant::now();
-        entry.reconnects.retain(|t| now.duration_since(*t) < std::time::Duration::from_secs(60));
-        if entry.reconnects.len() >= ROUNDS_PER_MINUTE {
-            info!("{}: released again, but reconnected {} times this minute already; leaving it", address, ROUNDS_PER_MINUTE);
-            return None;
+    /// Starts the reconnect round decided on, or with none, clears
+    /// Reconnecting unless a round is running
+    async fn act_on(&self, address: &str, decision: Option<(u32, Release)>) {
+        match decision {
+            Some((round, release)) => {
+                tokio::spawn(reconnect_after_release(self.clone(), address.to_string(), round, release));
+            }
+            None => {
+                let idle = self.0.devices.lock().await.get(address).is_some_and(|e| e.active_round.is_none());
+                if idle {
+                    self.update(address, |s| s.reconnecting = false).await;
+                }
+            }
         }
-        entry.reconnects.push(now);
-        entry.reconnect_round += 1;
-        entry.active_round = Some(entry.reconnect_round);
-        entry.back_from_join = release == Release::JoinedWhileUnlisted;
-        Some((entry.reconnect_round, release))
     }
 
     /// What the AirPods' device list says about this computer and the others
@@ -749,6 +835,84 @@ impl Hub {
     }
 }
 
+/// The AirPods let this computer go while another device had the audio (the
+/// main AirPod left an ear, or both were out a while). They do the
+/// same to an iPhone in the mirror case, and it reconnects 1–2 s later; BlueZ
+/// doesn't reconnect a link the other side ended, so podsd does, as the
+/// iPhone would. A few tries only (EarPort: 2 s, then every 5 s, 3 tries).
+async fn reconnect_after_release(hub: Hub, address: String, round: u32, release: Release) {
+    match release {
+        Release::ForOther => info!(
+            "{}: the AirPods let this computer go while another device had the audio; connecting again",
+            address
+        ),
+        Release::JoinedWhileUnlisted => {
+            info!(
+                "{}: the AirPods dropped this computer for a device joining before it was on their priority list; connecting again",
+                address
+            );
+            // That device took the AirPods to play: what played here stops,
+            // as when another device takes them over (Apple: the Mac pauses)
+            let paused = tokio::task::spawn_blocking(crate::media_controller::pause_local_players_sync)
+                .await
+                .unwrap_or(0);
+            if paused > 0 {
+                info!("{}: paused {} player(s): the audio moved to the device that joined", address, paused);
+            }
+        }
+    }
+    // Reconnecting was set as the connection ended (Hub::note_end)
+    if reconnect(&hub, &address).await {
+        // Ready (which clears Reconnecting) follows once the control channel
+        // is up; never leave a shell showing AirPods that didn't come back
+        let mut answered = false;
+        for _ in 0..20 {
+            if hub.state(&address).await.is_none_or(|s| s.ready) {
+                answered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if !answered {
+            info!("{}: connected again, but the AirPods didn't answer", address);
+        }
+    } else {
+        info!("{}: not reconnecting any more", address);
+        // No session to report the move to: a later connection mustn't
+        hub.take_back_from_join(&address).await;
+    }
+    hub.end_reconnect_round(&address, round).await;
+}
+
+/// Connects again: after 2 s, then 5 s and 5 s (EarPort's timing). True once
+/// connected.
+async fn reconnect(hub: &Hub, address: &str) -> bool {
+    for (attempt, wait) in [2u64, 5, 5].into_iter().enumerate() {
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        if hub.state(address).await.is_some_and(|s| s.connected) {
+            info!("{}: connected again", address);
+            return true;
+        }
+        let Some(path) = hub.bluez_path(address).await else {
+            return false;
+        };
+        // An attempt at AirPods that went off can hang for most of a minute
+        // (50 s seen), holding Reconnecting the whole time
+        let call = hub
+            .system()
+            .call_method(Some("org.bluez"), path.as_str(), Some("org.bluez.Device1"), "Connect", &());
+        match tokio::time::timeout(std::time::Duration::from_secs(10), call).await {
+            Ok(Ok(_)) => {
+                info!("{}: connected again (try {})", address, attempt + 1);
+                return true;
+            }
+            Ok(Err(e)) => info!("{}: reconnecting failed (try {}): {}", address, attempt + 1, e),
+            Err(_) => info!("{}: reconnecting failed (try {}): no answer in 10 s", address, attempt + 1),
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,6 +940,8 @@ mod tests {
             joining_at: joined_ago.map(|s| std::time::Instant::now() - std::time::Duration::from_millis(s)),
             other_was_here: false,
             end_noted: None,
+            reason: None,
+            settled: None,
             back_from_join: false,
         }
     }
@@ -816,6 +982,44 @@ mod tests {
         let mut quiet = entry(true, false, None);
         assert!(!quiet.note_end());
         assert!(!quiet.note_end());
+    }
+
+    fn released() -> Entry {
+        let mut e = entry(false, false, None);
+        e.state.other_device = "iPhone".into();
+        e
+    }
+
+    #[test]
+    fn the_reason_decides_whichever_comes_first() {
+        // BlueZ's reason after the end: Reconnecting at once, the round then
+        let mut e = released();
+        let end = e.noted_end();
+        assert!(end.reconnecting && end.waiting && end.decision.is_none());
+        assert!(matches!(e.reason_came(true), Some(Some((1, Release::ForOther)))));
+        // ... and the second notice of the end starts nothing more
+        let end = e.noted_end();
+        assert!(end.reconnecting && end.decision.is_none() && !end.waiting);
+
+        // The reason first: kept, and the end decides
+        let mut e = released();
+        assert_eq!(e.reason_came(true), None);
+        let end = e.noted_end();
+        assert!(end.reconnecting && matches!(end.decision, Some(Some((1, Release::ForOther)))));
+        assert!(e.noted_end().decision.is_none());
+
+        // A lost link (Timeout) first: no Reconnecting, now or at the second notice
+        let mut e = released();
+        assert_eq!(e.reason_came(false), None);
+        let end = e.noted_end();
+        assert!(!end.reconnecting && matches!(end.decision, Some(None)));
+        let end = e.noted_end();
+        assert!(!end.reconnecting && end.decision.is_none() && !end.waiting);
+
+        // Not a release: the AirPods ending it starts nothing
+        let mut e = entry(true, false, None);
+        assert!(!e.noted_end().reconnecting);
+        assert!(matches!(e.reason_came(true), Some(None)));
     }
 
     #[test]

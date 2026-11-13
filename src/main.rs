@@ -234,8 +234,9 @@ async fn run_le_monitor(hub: Hub, system: Connection) {
     }
 }
 
-/// Logs why AirPods disconnected (BlueZ's Device1.Disconnected: the reason,
-/// such as org.bluez.Reason.Remote or .Timeout, and a message)
+/// Why AirPods disconnected (BlueZ's Device1.Disconnected: the reason, such
+/// as org.bluez.Reason.Remote or .Timeout, and a message): logged, and passed
+/// on to decide whether to reconnect (Hub::on_disconnect_reason)
 async fn log_disconnect_reasons(hub: Hub) {
     let system = hub.system().clone();
     let rule = async {
@@ -269,96 +270,8 @@ async fn log_disconnect_reasons(hub: Hub) {
         }
         let (reason, message) = msg.body().deserialize::<(String, String)>().unwrap_or_default();
         info!("{} disconnected: {} ({})", address, reason, message);
-        // The AirPods ended it ("Power Off" reads as Remote here). After a
-        // lost link (Timeout) BlueZ reconnects by itself.
-        match reason == "org.bluez.Reason.Remote" {
-            true => match hub.start_reconnect_round(&address).await {
-                Some((round, release)) => {
-                    tokio::spawn(reconnect_after_release(hub.clone(), address, round, release));
-                }
-                None => hub.drop_unconfirmed_release(&address).await,
-            },
-            false => hub.drop_unconfirmed_release(&address).await,
-        }
+        hub.on_disconnect_reason(&address, reason == "org.bluez.Reason.Remote").await;
     }
-}
-
-/// The AirPods let this computer go while another device had the audio (the
-/// main AirPod left an ear, or both were out a while). They do the
-/// same to an iPhone in the mirror case, and it reconnects 1–2 s later; BlueZ
-/// doesn't reconnect a link the other side ended, so podsd does, as the
-/// iPhone would. A few tries only (EarPort: 2 s, then every 5 s, 3 tries).
-async fn reconnect_after_release(hub: Hub, address: String, round: u32, release: hub::Release) {
-    match release {
-        hub::Release::ForOther => info!(
-            "{}: the AirPods let this computer go while another device had the audio; connecting again",
-            address
-        ),
-        hub::Release::JoinedWhileUnlisted => {
-            info!(
-                "{}: the AirPods dropped this computer for a device joining before it was on their priority list; connecting again",
-                address
-            );
-            // That device took the AirPods to play: what played here stops,
-            // as when another device takes them over (Apple: the Mac pauses)
-            let paused = tokio::task::spawn_blocking(media_controller::pause_local_players_sync)
-                .await
-                .unwrap_or(0);
-            if paused > 0 {
-                info!("{}: paused {} player(s): the audio moved to the device that joined", address, paused);
-            }
-        }
-    }
-    // Reconnecting was set as the connection ended (Hub::note_end)
-    if reconnect(&hub, &address).await {
-        // Ready (which clears Reconnecting) follows once the control channel
-        // is up; never leave a shell showing AirPods that didn't come back
-        let mut answered = false;
-        for _ in 0..20 {
-            if hub.state(&address).await.is_none_or(|s| s.ready) {
-                answered = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-        if !answered {
-            info!("{}: connected again, but the AirPods didn't answer", address);
-        }
-    } else {
-        info!("{}: not reconnecting any more", address);
-        // No session to report the move to: a later connection mustn't
-        hub.take_back_from_join(&address).await;
-    }
-    hub.end_reconnect_round(&address, round).await;
-}
-
-/// Connects again: after 2 s, then 5 s and 5 s (EarPort's timing). True once
-/// connected.
-async fn reconnect(hub: &Hub, address: &str) -> bool {
-    for (attempt, wait) in [2u64, 5, 5].into_iter().enumerate() {
-        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-        if hub.state(address).await.is_some_and(|s| s.connected) {
-            info!("{}: connected again", address);
-            return true;
-        }
-        let Some(path) = hub.bluez_path(address).await else {
-            return false;
-        };
-        // An attempt at AirPods that went off can hang for most of a minute
-        // (50 s seen), holding Reconnecting the whole time
-        let call = hub
-            .system()
-            .call_method(Some("org.bluez"), path.as_str(), Some("org.bluez.Device1"), "Connect", &());
-        match tokio::time::timeout(std::time::Duration::from_secs(10), call).await {
-            Ok(Ok(_)) => {
-                info!("{}: connected again (try {})", address, attempt + 1);
-                return true;
-            }
-            Ok(Err(e)) => info!("{}: reconnecting failed (try {}): {}", address, attempt + 1, e),
-            Err(_) => info!("{}: reconnecting failed (try {}): no answer in 10 s", address, attempt + 1),
-        }
-    }
-    false
 }
 
 /// Follows BlueZ: AirPods connecting and disconnecting, and newly paired ones.
