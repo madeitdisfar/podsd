@@ -28,8 +28,9 @@ pub struct Config {
     /// connected elsewhere. Needs `Experimental = true` in /etc/bluetooth/main.conf;
     /// without it this does nothing.
     pub ble_monitor: bool,
-    /// With `bleMonitor`: connect the AirPods by themselves when their lid opens
-    /// and they're free. Off: a client offers Connect instead.
+    /// With `bleMonitor`: connect the AirPods by themselves when their lid
+    /// opens: while they're free, or with Apple's Device ID also next to
+    /// another device that has them. Off: a client offers Connect instead.
     pub auto_connect: bool,
     /// CaseOpen counts only adverts at least this strong (dBm): a case nearby,
     /// not one across the room.

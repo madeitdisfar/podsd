@@ -279,7 +279,7 @@ Every key is optional:
 | `stemControl` | double press: next track, triple press: previous track |
 | `restartWireplumber` | restart WirePlumber when the AirPods have no A2DP profile (cuts all audio for a moment) |
 | `bleMonitor` | watch the AirPods' BLE adverts: `CaseOpen`, the case's battery, battery while connected elsewhere. Needs `Experimental = true` under `[General]` in `/etc/bluetooth/main.conf` (then `systemctl restart bluetooth`); BlueZ filters for Apple's adverts, so nothing scans actively. Without it, nothing happens |
-| `autoConnect` | with `bleMonitor`: connect by itself when the lid opens and the AirPods are free (off: clients offer Connect) |
+| `autoConnect` | with `bleMonitor`: connect by itself when the lid opens, while the AirPods are free or, with Apple's Device ID, also next to another device that has them (off: clients offer Connect) |
 | `caseOpenRssi` | `CaseOpen` only for adverts at least this strong (dBm), so a case across the room doesn't count |
 
 Known AirPods and their BLE keys are kept in `~/.local/share/podsd/devices.json` (mode 0600:
