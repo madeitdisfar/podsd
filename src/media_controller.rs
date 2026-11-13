@@ -110,6 +110,17 @@ impl MediaController {
         self.state.lock().await.self_action_at = Some(std::time::Instant::now());
     }
 
+    /// Playback here was started by hand (or another device took the audio):
+    /// what ear detection paused is no longer for it to resume, or a bud
+    /// going back in would start a player paused by hand since
+    pub async fn forget_paused(&self) {
+        let mut state = self.state.lock().await;
+        if !state.paused_by_app_services.is_empty() {
+            debug!("Forgetting the players ear detection paused: {:?}", state.paused_by_app_services);
+            state.paused_by_app_services.clear();
+        }
+    }
+
     /// Another device has the AirPods' audio (or this computer has it again)
     pub async fn set_elsewhere(&self, elsewhere: bool) {
         self.state.lock().await.elsewhere = elsewhere;
@@ -408,6 +419,9 @@ impl MediaController {
 
     pub async fn pause_all_media(&self) {
         debug!("Pausing all media (without tracking for resume)");
+        // Another device took the audio: what ear detection paused before
+        // isn't to be resumed by a bud going back in
+        self.forget_paused().await;
 
         let paused_count = tokio::task::spawn_blocking(|| {
             let conn = match Connection::new_session() {
@@ -454,7 +468,8 @@ impl MediaController {
     async fn resume(&self) {
         debug!("Resuming playback");
         self.mark_self_action().await;
-        let services = self.state.lock().await.paused_by_app_services.clone();
+        // Resumed once: failed or not, they're not podsd's to resume later
+        let services = std::mem::take(&mut self.state.lock().await.paused_by_app_services);
 
         if services.is_empty() {
             debug!("No services to resume");
@@ -487,7 +502,6 @@ impl MediaController {
 
         if resumed_count > 0 {
             info!("Resumed {} media player(s) via DBus", resumed_count);
-            self.state.lock().await.paused_by_app_services.clear();
         } else {
             error!("Failed to resume any media players via DBus");
         }

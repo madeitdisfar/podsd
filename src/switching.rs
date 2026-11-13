@@ -585,7 +585,11 @@ impl Switcher {
             if changed {
                 self.state.lock().await.told_streaming = streaming;
             }
-            if changed && !self.media.recent_self_action(Duration::from_secs(2)).await {
+            let own_doing = self.media.recent_self_action(Duration::from_secs(2)).await;
+            if started && !own_doing {
+                self.media.forget_paused().await;
+            }
+            if changed && !own_doing {
                 let local = self.hub.local_mac().to_string();
                 for other in self.reachable_others().await {
                     if let Err(e) = self.aacp.send_media_information(&local, &other, streaming).await {
