@@ -40,10 +40,15 @@ impl Session {
         self.aacp.shutdown().await;
     }
 
+    /// The audio profile stays as it is. Turning it back on here, as the link
+    /// went down, only worked when it beat the audio card's going (once in
+    /// five, 11-13), and then WirePlumber remembered "on": the next connection
+    /// came up with the audio on while the iPhone had it, a stream started
+    /// here, and the AirPods gave this computer the audio (23:12:45). The
+    /// next session sets the profile once it knows who has the audio
+    /// (Switcher::on_card); only the daemon's exit turns it back on.
     pub async fn stop(self) {
         self.media.stop().await;
-        // Don't leave the AirPods silent once nothing manages them.
-        self.media.restore_profile_if_off().await;
         self.aacp.shutdown().await;
         for task in self.tasks {
             task.abort();
@@ -883,6 +888,8 @@ impl Hub {
             devices.values_mut().filter_map(|e| e.session.take()).collect()
         };
         for session in sessions {
+            // Don't leave the AirPods silent once nothing manages them
+            session.media.restore_profile_if_off().await;
             session.stop().await;
         }
     }
