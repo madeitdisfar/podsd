@@ -84,6 +84,7 @@ const LISTS_PER_MINUTE: usize = 6;
 /// A connected-devices entry's first info byte: 0 disconnected, 1 still
 /// connecting, 2 connected
 const DEVICE_CONNECTED: u8 = 2;
+const DEVICE_DISCONNECTED: u8 = 0;
 
 /// Audio source reports this soon after taking over are ignored
 const TAKE_SETTLE: Duration = Duration::from_secs(2);
@@ -111,16 +112,16 @@ impl Switcher {
         }
     }
 
-    /// The other devices on the AirPods (connected devices report, minus this
-    /// computer)
+    /// The other devices on the AirPods, connected or connecting (connected
+    /// devices report, minus this computer and entries marked disconnected)
     async fn others(&self) -> Vec<String> {
         let local = self.hub.local_mac().to_ascii_uppercase();
         let state = self.aacp.state.lock().await;
         state
             .connected_devices
             .iter()
+            .filter(|d| d.info1 != DEVICE_DISCONNECTED && d.mac.to_ascii_uppercase() != local)
             .map(|d| d.mac.clone())
-            .filter(|m| m.to_ascii_uppercase() != local)
             .collect()
     }
 
