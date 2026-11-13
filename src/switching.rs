@@ -439,8 +439,18 @@ impl Switcher {
     /// device, better to give up aacp control")
     pub async fn on_audio_source(&self, mac: &str, kind: AudioSourceType) {
         let local = self.hub.local_mac().to_ascii_uppercase();
-        let settling = self.state.lock().await.took_at.is_some_and(|t| t.elapsed() < TAKE_SETTLE);
+        let (settling, owning) = {
+            let st = self.state.lock().await;
+            (st.took_at.is_some_and(|t| t.elapsed() < TAKE_SETTLE), st.owned || !st.reported)
+        };
         if kind != AudioSourceType::None && mac.to_ascii_uppercase() != local && !settling {
+            // Not owning already, there's nothing to give up: the iPhone
+            // reports its audio again and again while it plays (hundreds of
+            // times an hour, 11-13 03:45-04:46)
+            if !owning {
+                self.refresh_other().await;
+                return;
+            }
             debug!("{}: {} plays now, giving up the audio", self.address, mac);
             let _ = self
                 .aacp
