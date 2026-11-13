@@ -116,9 +116,23 @@ impl MediaController {
         !self.state.lock().await.paused_by_app_services.is_empty()
     }
 
-    /// Playback here was started by hand (or another device took the audio):
-    /// what ear detection paused is no longer for it to resume, or a bud
-    /// going back in would start a player paused by hand since
+    /// Playback started here other than by podsd: if it's one of the players
+    /// ear detection paused, the user took it over, and the list is no longer
+    /// for ear detection to resume (a bud going back in would start it after
+    /// a pause by hand since). Other sound (a chat's ping) leaves it.
+    pub async fn forget_paused_if_resumed(&self) {
+        let paused = self.state.lock().await.paused_by_app_services.clone();
+        if paused.is_empty() {
+            return;
+        }
+        let playing = tokio::task::spawn_blocking(playing_players_sync).await.unwrap_or_default();
+        if paused.iter().any(|p| playing.contains(p)) {
+            self.forget_paused().await;
+        }
+    }
+
+    /// What ear detection paused is no longer for it to resume (another
+    /// device took the audio, or the user played it again)
     pub async fn forget_paused(&self) {
         let mut state = self.state.lock().await;
         if !state.paused_by_app_services.is_empty() {

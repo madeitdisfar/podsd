@@ -594,7 +594,7 @@ impl Switcher {
             // still on their way: no news to tell yet
             let own_doing = self.media.recent_self_action(Duration::from_secs(2)).await;
             if started && !own_doing {
-                self.media.forget_paused().await;
+                self.media.forget_paused_if_resumed().await;
             }
             // Only audio played to the AirPods counts: sound on the speakers
             // while another device owns them isn't this computer streaming
