@@ -1,6 +1,7 @@
 use crate::devices::airpods::AirPodsInformation;
 use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
 use crate::utils::{load_devices, save_devices};
+use super::relay;
 use bluer::{
     Address, AddressType, Error, Result,
     l2cap::{SeqPacket, Socket, SocketAddr},
@@ -1086,77 +1087,19 @@ impl AACPManager {
         self.send_data_packet(&packet).await
     }
 
+    /// The relayed messages (smart routing), built in bluetooth/relay.rs
     pub async fn send_media_information_new_device(
         &self,
         self_mac_address: &str,
         target_mac_address: &str,
+        streaming_state: bool,
     ) -> Result<()> {
-        let opcode = [opcodes::SMART_ROUTING, 0x00];
-        let mut buffer = Vec::with_capacity(112);
-        let target_mac_bytes: Vec<u8> = target_mac_address
-            .split(':')
-            .map(|s| u8::from_str_radix(s, 16).unwrap())
-            .collect();
-        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
-
-        buffer.extend_from_slice(&[0x68, 0x00]);
-        buffer.extend_from_slice(&[0x01, 0xE5, 0x4A]);
-        buffer.extend_from_slice(b"playingApp");
-        buffer.push(0x42);
-        buffer.extend_from_slice(b"NA");
-        buffer.push(0x52);
-        buffer.extend_from_slice(b"hostStreamingState");
-        buffer.push(0x42);
-        buffer.extend_from_slice(b"NO");
-        buffer.push(0x49);
-        buffer.extend_from_slice(b"btAddress");
-        buffer.push(0x51);
-        buffer.extend_from_slice(self_mac_address.as_bytes());
-        buffer.push(0x46);
-        buffer.extend_from_slice(b"btName");
-        buffer.push(0x43);
-        buffer.extend_from_slice(b"Mac");
-        buffer.push(0x58);
-        buffer.extend_from_slice(b"otherDevice");
-        buffer.extend_from_slice(b"AudioCategory");
-        buffer.extend_from_slice(&[0x30, 0x64]);
-
-        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
-        self.send_data_packet(&packet).await
+        self.send_data_packet(&relay::greeting(self_mac_address, target_mac_address, streaming_state))
+            .await
     }
 
     pub async fn send_hijack_request(&self, target_mac_address: &str) -> Result<()> {
-        let opcode = [opcodes::SMART_ROUTING, 0x00];
-        let mut buffer = Vec::with_capacity(106);
-        let target_mac_bytes: Vec<u8> = target_mac_address
-            .split(':')
-            .map(|s| u8::from_str_radix(s, 16).unwrap())
-            .collect();
-        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
-        buffer.extend_from_slice(&[0x62, 0x00]);
-        buffer.extend_from_slice(&[0x01, 0xE5]);
-        buffer.push(0x4A);
-        buffer.extend_from_slice(b"localscore");
-        buffer.extend_from_slice(&[0x30, 0x64]);
-        buffer.push(0x46);
-        buffer.extend_from_slice(b"reason");
-        buffer.push(0x48);
-        buffer.extend_from_slice(b"Hijackv2");
-        buffer.push(0x51);
-        buffer.extend_from_slice(b"audioRoutingScore");
-        buffer.extend_from_slice(&[0x31, 0x2D, 0x01, 0x5F]);
-        buffer.extend_from_slice(b"audioRoutingSetOwnershipToFalse");
-        buffer.push(0x01);
-        buffer.push(0x4B);
-        buffer.extend_from_slice(b"remotescore");
-        buffer.push(0xA5);
-
-        while buffer.len() < 106 {
-            buffer.push(0x00);
-        }
-
-        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
-        self.send_data_packet(&packet).await
+        self.send_data_packet(&relay::hijack_request(target_mac_address)).await
     }
 
     pub async fn send_media_information(
@@ -1165,104 +1108,16 @@ impl AACPManager {
         target_mac_address: &str,
         streaming_state: bool,
     ) -> Result<()> {
-        let opcode = [opcodes::SMART_ROUTING, 0x00];
-        let mut buffer = Vec::with_capacity(138);
-        let target_mac_bytes: Vec<u8> = target_mac_address
-            .split(':')
-            .map(|s| u8::from_str_radix(s, 16).unwrap())
-            .collect();
-        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
-        buffer.extend_from_slice(&[0x82, 0x00]);
-        buffer.extend_from_slice(&[0x01, 0xE5, 0x4A]);
-        buffer.extend_from_slice(b"PlayingApp");
-        buffer.push(0x56);
-        buffer.extend_from_slice(b"com.google.ios.youtube");
-        buffer.push(0x52);
-        buffer.extend_from_slice(b"HostStreamingState");
-        buffer.push(0x42);
-        buffer.extend_from_slice(if streaming_state { b"YES" } else { b"NO" });
-        buffer.push(0x49);
-        buffer.extend_from_slice(b"btAddress");
-        buffer.push(0x51);
-        buffer.extend_from_slice(self_mac_address.as_bytes());
-        buffer.extend_from_slice(b"btName");
-        buffer.push(0x43);
-        buffer.extend_from_slice(b"Mac");
-        buffer.push(0x58);
-        buffer.extend_from_slice(b"otherDevice");
-        buffer.extend_from_slice(b"AudioCategory");
-        buffer.extend_from_slice(&[0x31, 0x2D, 0x01]);
-
-        while buffer.len() < 138 {
-            buffer.push(0x00);
-        }
-        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
-        self.send_data_packet(&packet).await
+        self.send_data_packet(&relay::media_information(self_mac_address, target_mac_address, streaming_state))
+            .await
     }
 
     pub async fn send_smart_routing_show_ui(&self, target_mac_address: &str) -> Result<()> {
-        let opcode = [opcodes::SMART_ROUTING, 0x00];
-        let mut buffer = Vec::with_capacity(134);
-        let target_mac_bytes: Vec<u8> = target_mac_address
-            .split(':')
-            .map(|s| u8::from_str_radix(s, 16).unwrap())
-            .collect();
-        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
-        buffer.extend_from_slice(&[0x7E, 0x00]);
-        buffer.extend_from_slice(&[0x01, 0xE6, 0x5B]);
-        buffer.extend_from_slice(b"SmartRoutingKeyShowNearbyUI");
-        buffer.push(0x01);
-        buffer.push(0x4A);
-        buffer.extend_from_slice(b"localscore");
-        buffer.extend_from_slice(&[0x31, 0x2D]);
-        buffer.push(0x01);
-        buffer.push(0x46);
-        buffer.extend_from_slice(b"reasonHhijackv2");
-        buffer.push(0x51);
-        buffer.extend_from_slice(b"audioRoutingScore");
-        buffer.push(0xA2);
-        buffer.push(0x5F);
-        buffer.extend_from_slice(b"audioRoutingSetOwnershipToFalse");
-        buffer.push(0x01);
-        buffer.push(0x4B);
-        buffer.extend_from_slice(b"remotescore");
-        buffer.push(0xA2);
-
-        while buffer.len() < 134 {
-            buffer.push(0x00);
-        }
-
-        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
-        self.send_data_packet(&packet).await
+        self.send_data_packet(&relay::show_nearby_ui(target_mac_address)).await
     }
 
     pub async fn send_hijack_reversed(&self, target_mac_address: &str) -> Result<()> {
-        let opcode = [opcodes::SMART_ROUTING, 0x00];
-        let mut buffer = Vec::with_capacity(97);
-        let target_mac_bytes: Vec<u8> = target_mac_address
-            .split(':')
-            .map(|s| u8::from_str_radix(s, 16).unwrap())
-            .collect();
-        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
-        buffer.extend_from_slice(&[0x59, 0x00]);
-        buffer.extend_from_slice(&[0x01, 0xE3]);
-        buffer.push(0x5F);
-        buffer.extend_from_slice(b"audioRoutingSetOwnershipToFalse");
-        buffer.push(0x01);
-        buffer.push(0x59);
-        buffer.extend_from_slice(b"audioRoutingShowReverseUI");
-        buffer.push(0x01);
-        buffer.push(0x46);
-        buffer.extend_from_slice(b"reason");
-        buffer.push(0x53);
-        buffer.extend_from_slice(b"ReverseBannerTapped");
-
-        while buffer.len() < 97 {
-            buffer.push(0x00);
-        }
-
-        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
-        self.send_data_packet(&packet).await
+        self.send_data_packet(&relay::hijack_reversed(target_mac_address)).await
     }
 
     pub async fn send_add_tipi_device(
@@ -1270,33 +1125,7 @@ impl AACPManager {
         self_mac_address: &str,
         target_mac_address: &str,
     ) -> Result<()> {
-        let opcode = [opcodes::SMART_ROUTING, 0x00];
-        let mut buffer = Vec::with_capacity(86);
-        let target_mac_bytes: Vec<u8> = target_mac_address
-            .split(':')
-            .map(|s| u8::from_str_radix(s, 16).unwrap())
-            .collect();
-        buffer.extend_from_slice(&target_mac_bytes.iter().rev().cloned().collect::<Vec<u8>>());
-        buffer.extend_from_slice(&[0x4E, 0x00]);
-        buffer.extend_from_slice(&[0x01, 0xE5]);
-        buffer.extend_from_slice(&[0x48, 0x69]);
-        buffer.extend_from_slice(b"idleTime");
-        buffer.extend_from_slice(&[0x08, 0x47]);
-        buffer.extend_from_slice(b"newTipi");
-        buffer.extend_from_slice(&[0x01, 0x49]);
-        buffer.extend_from_slice(b"btAddress");
-        buffer.push(0x51);
-        buffer.extend_from_slice(self_mac_address.as_bytes());
-        buffer.push(0x46);
-        buffer.extend_from_slice(b"btName");
-        buffer.push(0x43);
-        buffer.extend_from_slice(b"Mac");
-        buffer.push(0x50);
-        buffer.extend_from_slice(b"nearbyAudioScore");
-        buffer.push(0x0E);
-
-        let packet = [opcode.as_slice(), buffer.as_slice()].concat();
-        self.send_data_packet(&packet).await
+        self.send_data_packet(&relay::new_device(self_mac_address, target_mac_address)).await
     }
 
     /// The hosts the AirPods should keep connected together, the playing one
