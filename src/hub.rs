@@ -108,6 +108,10 @@ pub enum Release {
     JoinedWhileUnlisted,
 }
 
+/// Control channels opened again on one link, for any reason (Hub::reopen_channel,
+/// Hub::retry_channel)
+const MAX_REOPENS: u8 = 2;
+
 /// A join this long before the link ended counts as its cause
 const JOIN_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -608,7 +612,6 @@ impl Hub {
     }
 
     async fn reopen_channel_inner(&self, address: &str) {
-        const MAX_REOPENS: u8 = 2;
         let session = {
             let mut devices = self.0.devices.lock().await;
             let Some(entry) = devices.get_mut(address) else {
@@ -650,6 +653,7 @@ impl Hub {
         let address = address.to_string();
         tokio::spawn(async move {
             let session = airpods::start(hub.clone(), address.clone()).await;
+            let failed = session.is_none();
             let leftover = {
                 let mut devices = hub.0.devices.lock().await;
                 match devices.get_mut(&address) {
@@ -669,6 +673,36 @@ impl Hub {
             if let Some(session) = leftover {
                 session.stop().await;
                 hub.update(&address, |s| s.clear_live()).await;
+            }
+            if failed {
+                hub.retry_channel(&address);
+            }
+        });
+    }
+
+    /// The control channel is gone (it closed, or opening it failed) while
+    /// BlueZ may still have the AirPods connected: nothing would open it again
+    /// until the link went down. If the link is still up in a moment, open it
+    /// again, within the link's reopens.
+    fn retry_channel(&self, address: &str) {
+        let hub = self.clone();
+        let address = address.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let retry = hub.0.devices.lock().await.get_mut(&address).is_some_and(|e| {
+                let due = e.state.connected && e.session.is_none() && !e.attaching;
+                if due && e.reopens >= MAX_REOPENS {
+                    info!("{}: no control channel, but opened it {} times on this link already; leaving it", address, MAX_REOPENS);
+                }
+                let retry = due && e.reopens < MAX_REOPENS;
+                if retry {
+                    e.reopens += 1;
+                }
+                retry
+            });
+            if retry {
+                info!("{}: still connected without a control channel; opening it again", address);
+                hub.attach(&address).await;
             }
         });
     }
@@ -718,6 +752,7 @@ impl Hub {
         })
         .await;
         self.after_end(address, end).await;
+        self.retry_channel(address);
     }
 
     /// BlueZ's reason for the end of a connection (Device1.Disconnected);
