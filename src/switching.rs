@@ -125,9 +125,11 @@ impl Switcher {
             .collect()
     }
 
-    /// The other devices that are fully connected: the only ones messages
-    /// can be relayed to. Relaying to a device still connecting made the
-    /// AirPods drop this computer ("Low Resources", 0.2 s later, every time).
+    /// The other devices that are fully connected: the ones messages are
+    /// relayed to. (Drops 0.2 s after greeting a device still connecting were
+    /// first blamed on the greeting; the cause was this computer missing from
+    /// the priority list. Waiting for a device to connect is kept: one still
+    /// connecting may not get the message.)
     async fn reachable_others(&self) -> Vec<String> {
         let local = self.hub.local_mac().to_ascii_uppercase();
         let state = self.aacp.state.lock().await;
