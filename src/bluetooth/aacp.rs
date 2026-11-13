@@ -38,7 +38,6 @@ pub mod opcodes {
     pub const SMART_ROUTING: u8 = 0x10;
     pub const SMART_ROUTING_RESP: u8 = 0x11;
     pub const SEND_CONNECTED_MAC: u8 = 0x14;
-    pub const SMART_ROUTING_INFO: u8 = 0x44;
     pub const HEADTRACKING: u8 = 0x17;
     pub const TIPI_3: u8 = 0x0C;
 }
@@ -1144,21 +1143,6 @@ impl AACPManager {
         self.send_data_packet(&packet).await
     }
 
-    /// What a Mac tells the AirPods about itself as it connects ("Send Smart
-    /// Routing 2.0 Info", opcode 0x44): its audio score, then its state with
-    /// the current time. Layout and values from EarPort
-    /// (github.com/Anoryth/earport), which found it in a Mac's logs: without
-    /// it, AirPods taking this computer for an Apple device drop it as the
-    /// main AirPod changes.
-    pub async fn send_smart_routing_info(&self) -> Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as u32)
-            .unwrap_or(0);
-        self.send_data_packet(&smart_routing_score_packet(0x07)).await?;
-        self.send_data_packet(&smart_routing_state_packet(0x00, now)).await
-    }
-
     pub async fn send_some_packet(&self) -> Result<()> {
         self.send_data_packet(&[0x29, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
             .await
@@ -1227,17 +1211,6 @@ async fn send_thread(mut rx: mpsc::Receiver<Vec<u8>>, sp: Arc<SeqPacket>) {
 
 /// A priority list's packet (after the 04 00 04 00 header): 14 00, the count,
 /// then each address with its bytes reversed. None for a bad address.
-fn smart_routing_score_packet(score: u8) -> [u8; 8] {
-    [opcodes::SMART_ROUTING_INFO, 0x00, 0x04, 0x00, 0x02, 0x00, 0x03, score]
-}
-
-fn smart_routing_state_packet(state: u8, unix_time: u32) -> Vec<u8> {
-    let mut packet = vec![opcodes::SMART_ROUTING_INFO, 0x00, 0x0E, 0x00, 0x03, 0x00, state, 0x01, 0x00, 0x00];
-    packet.extend(unix_time.to_le_bytes());
-    packet.extend([0x00; 4]);
-    packet
-}
-
 fn priority_list_packet(hosts: &[String]) -> Option<Vec<u8>> {
     let mut packet = vec![0x14, 0x00, u8::try_from(hosts.len()).ok()?];
     for host in hosts {
@@ -1255,21 +1228,7 @@ fn priority_list_packet(hosts: &[String]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod priority_list_tests {
-    use super::{priority_list_packet, smart_routing_score_packet, smart_routing_state_packet};
-
-    #[test]
-    fn smart_routing_info_matches_earports_bytes() {
-        // EarPort's test_smart_routing, less the 04 00 04 00 header that
-        // send_data_packet adds
-        assert_eq!(smart_routing_score_packet(0x07), [0x44, 0x00, 0x04, 0x00, 0x02, 0x00, 0x03, 0x07]);
-        assert_eq!(
-            smart_routing_state_packet(0x00, 0x6AC6B123),
-            vec![
-                0x44, 0x00, 0x0E, 0x00, 0x03, 0x00, 0x00, 0x01, 0x00, 0x00, 0x23, 0xB1, 0xC6, 0x6A, 0x00, 0x00,
-                0x00, 0x00,
-            ]
-        );
-    }
+    use super::priority_list_packet;
 
     #[test]
     fn matches_earports_bytes() {

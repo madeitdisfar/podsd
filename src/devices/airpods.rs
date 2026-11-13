@@ -331,15 +331,6 @@ async fn handle_event(
             })
             .await;
             hub.sync_alias(address, &info.name, false).await;
-            // The AirPods answered: tell them about this computer, as a Mac
-            // does on connecting (B27: without it, each time the main AirPod
-            // changed they gave the audio to the iPhone rejoining)
-            if hub.apple_id() {
-                info!("{}: sending the smart routing info, as a Mac", address);
-                if let Err(e) = switcher.aacp().send_smart_routing_info().await {
-                    warn!("{}: sending the smart routing info failed: {}", address, e);
-                }
-            }
         }
         AACPEvent::ConnectedDevices(_, new_devices) => {
             // For a drop by a device joining before this computer was listed
