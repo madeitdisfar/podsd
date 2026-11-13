@@ -555,10 +555,20 @@ impl Switcher {
     /// while another device has the audio; otherwise on, as WirePlumber
     /// remembers the "off" podsd set last time, and the AirPods connecting
     /// alone and worn then played nothing here.
+    /// The card can come before the AirPods say who has the audio (the audio
+    /// link at 11-13 20:45:29, the device list 20:45:32): deciding then would turn the
+    /// audio on here, and off again a moment later, while the iPhone has it.
+    /// So this waits for the first word on ownership, a little while; alone,
+    /// the AirPods may never give one, and then the audio is this computer's.
     pub async fn on_card(&self) {
+        const OWNER_WAIT: Duration = Duration::from_secs(10);
+        let start = Instant::now();
+        while !self.state.lock().await.reported && start.elapsed() < OWNER_WAIT {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
         let elsewhere = {
             let st = self.state.lock().await;
-            st.off_for_other && !st.owned
+            st.reported && !st.owned
         };
         if elsewhere {
             let _ = self.media.deactivate_a2dp_profile().await;
