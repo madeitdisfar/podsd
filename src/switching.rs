@@ -59,10 +59,10 @@ struct State {
     /// message since they (last) connected
     greeted: HashSet<String>,
     /// The last priority list sent: the other host, and whether this computer
-    /// went first; when; and how many this session
+    /// went first; when; and when each list went out this last minute
     listed: Option<(String, bool)>,
     listed_at: Option<Instant>,
-    lists_sent: u8,
+    lists_sent: Vec<Instant>,
     /// The other device last seen connected this session: the list names it
     /// even while it's briefly gone or still rejoining
     partner: Option<String>,
@@ -73,9 +73,12 @@ struct State {
 /// AirPods' priority list, and the device they play from
 const HOST_LISTED: u8 = 0x01;
 const HOST_PLAYS: u8 = 0x02;
-/// The same priority list again only after this; at most so many a session
+/// The same priority list again only after this; at most so many a minute.
+/// Each change of owner sends one (the playing host goes first), so a cap per
+/// session ran out in busy ones (8 by 11:04 on 11-13; the main AirPod
+/// changing after that left this computer unlisted for good)
 const LIST_REPEAT: Duration = Duration::from_secs(2);
-const LISTS_MAX: u8 = 8;
+const LISTS_PER_MINUTE: usize = 6;
 
 
 /// A connected-devices entry's first info byte: 0 disconnected, 1 still
@@ -168,15 +171,20 @@ impl Switcher {
         {
             let mut st = self.state.lock().await;
             let same = st.listed.as_ref() == Some(&key);
+            st.lists_sent.retain(|t| t.elapsed() < Duration::from_secs(60));
             if (same && me.info2 & HOST_LISTED != 0)
                 || (same && st.listed_at.is_some_and(|t| t.elapsed() < LIST_REPEAT))
-                || st.lists_sent >= LISTS_MAX
             {
                 return;
             }
+            if st.lists_sent.len() >= LISTS_PER_MINUTE {
+                debug!("{}: {} priority lists this minute already, not sending another", self.address, LISTS_PER_MINUTE);
+                return;
+            }
             st.listed = Some(key);
-            st.listed_at = Some(Instant::now());
-            st.lists_sent += 1;
+            let now = Instant::now();
+            st.listed_at = Some(now);
+            st.lists_sent.push(now);
         }
         let local = self.hub.local_mac().to_string();
         let hosts = if mine_first { [local, other.clone()] } else { [other.clone(), local] };
