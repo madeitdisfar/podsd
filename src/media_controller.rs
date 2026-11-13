@@ -1169,12 +1169,19 @@ fn set_card_profile_sync(card_index: u32, profile_name: &str) -> bool {
         None => return false,
     };
     let mut introspector = context.introspect();
-    let op = introspector.set_card_profile_by_index(card_index, profile_name, None);
+    // The server's answer: a profile the card doesn't have, or a card gone
+    // meanwhile, fails here
+    let done = Rc::new(RefCell::new(false));
+    let op = introspector.set_card_profile_by_index(card_index, profile_name, {
+        let done = done.clone();
+        Some(Box::new(move |success| *done.borrow_mut() = success))
+    });
     while op.get_state() == OperationState::Running {
         mainloop.iterate(false);
     }
     mainloop.quit(Retval(0));
-    true
+    let success = *done.borrow();
+    success
 }
 
 pub fn transition_sink_volume(sink_name: &str, target_volume: u32) -> bool {
