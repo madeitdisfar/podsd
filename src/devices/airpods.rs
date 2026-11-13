@@ -305,9 +305,15 @@ async fn handle_event(
                 .await
                 .is_some_and(|s| s.settings.get("ear-detection") != Some(&settings::SettingValue::Bool(false)));
             if config.ear_pause && enabled {
+                // The first report after connecting is where the buds already
+                // are, not a bud going in: claiming then sent OwnsConnection at
+                // every connect (11-13 19:48:21)
+                let first = old.is_empty();
                 media.handle_ear_detection(old, new).await;
                 // After the pause / resume above, so the claim comes with playback
-                switcher.on_ear(was_in, any_in).await;
+                if !first {
+                    switcher.on_ear(was_in, any_in).await;
+                }
             }
         }
         AACPEvent::ConversationalAwareness(status) => {
