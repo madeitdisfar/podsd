@@ -580,6 +580,11 @@ impl Switcher {
     /// Follows local playback: tells the other devices when it starts and stops,
     /// and takes the AirPods over when it starts (automatic switching).
     pub async fn run(self, automatic: bool, apple_id: bool) {
+        // What plays here as the session starts was playing already: it isn't
+        // playback starting. Counted as that, sound on the speakers took the
+        // AirPods from the iPhone 0.3 s into every reconnect (11-14 00:02:02)
+        let playing = tokio::task::spawn_blocking(local_audio_active_sync).await.unwrap_or(false);
+        self.state.lock().await.was_active = playing;
         loop {
             tokio::time::sleep(POLL).await;
             let active = tokio::task::spawn_blocking(local_audio_active_sync).await.unwrap_or(false);
