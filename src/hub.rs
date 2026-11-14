@@ -69,6 +69,9 @@ struct Entry {
     near: bool,
     /// When this opening of the lid last asked BlueZ to connect
     lid_connect_at: Option<std::time::Instant>,
+    /// When the case's own advert last gave its battery (le::CaseAdvert), while
+    /// that's the freshest word on it
+    case_frame_at: Option<std::time::Instant>,
     /// When the last connection ended, and whether (and why) the AirPods had
     /// just let this computer go
     ended: Option<(std::time::Instant, Option<Release>)>,
@@ -239,6 +242,10 @@ const REASON_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// advert. This long without any sign of the case, it went out of range.
 const ADVERT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// The case sends its own advert every 30–40 s while charging or just handled,
+/// and nothing when idle: this long without one, its reading is the last one
+const CASE_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 #[derive(Clone)]
 pub struct Hub(Arc<Inner>);
 
@@ -329,6 +336,7 @@ impl Hub {
                     lid_open: false,
                     near: false,
                     lid_connect_at: None,
+                    case_frame_at: None,
                     ended: None,
                     reconnects: Vec::new(),
                     reconnect_round: 0,
@@ -428,6 +436,9 @@ impl Hub {
                 .lids
                 .insert(advert.source, (advert.lid, std::time::Instant::now()))
                 .map(|(lid, _)| lid);
+            if advert.case.is_some() {
+                entry.case_frame_at = None;
+            }
             let news = (previous != Some(advert.lid) && advert.in_case()).then(|| advert.lid_open());
             if let Some(open) = news {
                 entry.lid_open = open;
@@ -495,6 +506,54 @@ impl Hub {
         }
     }
 
+    /// The case's own advert (le::CaseAdvert): its battery, live, and that of
+    /// the buds in it while the control channel isn't up to say so exactly.
+    /// For any known AirPods, connected or not, as the iPhone's battery widget.
+    pub async fn on_case_advert(&self, address: &str, advert: crate::bluetooth::le::CaseAdvert) {
+        debug!("Case advert {}: {:?}", address, advert);
+        match self.0.devices.lock().await.get_mut(address) {
+            Some(entry) => entry.case_frame_at = Some(std::time::Instant::now()),
+            None => return,
+        }
+        let (level, charging) = advert.case;
+        self.update(address, |s| {
+            s.battery_case = crate::state::Battery::reading(level, charging);
+            if !s.ready {
+                // A bud not in the case keeps its last reading
+                if let Some((l, c)) = advert.left {
+                    s.battery_left = crate::state::Battery::reading(l, c);
+                }
+                if let Some((l, c)) = advert.right {
+                    s.battery_right = crate::state::Battery::reading(l, c);
+                }
+                if advert.left.is_some() || advert.right.is_some() {
+                    s.battery_source = "ble".to_string();
+                }
+            }
+        })
+        .await;
+        crate::utils::save_case_battery(address, level, crate::state::now());
+    }
+
+    /// The case's own advert gave its battery within CASE_FRAME_TIMEOUT: the
+    /// buds' report that it's out of their reach doesn't make it stale
+    pub async fn case_frame_live(&self, address: &str) -> bool {
+        self.0
+            .devices
+            .lock()
+            .await
+            .get(address)
+            .and_then(|e| e.case_frame_at)
+            .is_some_and(|t| t.elapsed() < CASE_FRAME_TIMEOUT)
+    }
+
+    /// Another source (a bud in the case) gave the case's battery
+    pub async fn forget_case_frame(&self, address: &str) {
+        if let Some(e) = self.0.devices.lock().await.get_mut(address) {
+            e.case_frame_at = None;
+        }
+    }
+
     /// A sign of a bud without a new advert (its signal strength changed)
     pub async fn on_advert_seen(&self, address: &str, source: bluer::Address) {
         if let Some(entry) = self.0.devices.lock().await.get_mut(address)
@@ -546,6 +605,21 @@ impl Hub {
                 };
                 for address in stale {
                     hub.close_lid(&address).await;
+                }
+                // The case went quiet: its reading is the last one now
+                let quiet: Vec<String> = {
+                    let mut devices = hub.0.devices.lock().await;
+                    devices
+                        .iter_mut()
+                        .filter(|(_, e)| e.case_frame_at.is_some_and(|t| t.elapsed() >= CASE_FRAME_TIMEOUT))
+                        .map(|(a, e)| {
+                            e.case_frame_at = None;
+                            a.clone()
+                        })
+                        .collect()
+                };
+                for address in quiet {
+                    hub.update(&address, |s| s.battery_case = s.battery_case.kept()).await;
                 }
             }
         });
@@ -992,6 +1066,7 @@ mod tests {
             lid_open: false,
             near: false,
             lid_connect_at: None,
+            case_frame_at: None,
             ended: None,
             reconnects: Vec::new(),
             reconnect_round: 0,

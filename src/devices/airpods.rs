@@ -236,6 +236,15 @@ async fn handle_event(
     let config = hub.config();
     match event {
         AACPEvent::BatteryInfo(batteries) => {
+            // With no bud in it, the buds can't read the case, but the case's own
+            // advert may have just now (le::CaseAdvert): that reading stays live
+            let case_reported = batteries
+                .iter()
+                .any(|b| b.component == BatteryComponent::Case && b.status != BatteryStatus::Disconnected);
+            if case_reported {
+                hub.forget_case_frame(address).await;
+            }
+            let case_frame_live = hub.case_frame_live(address).await;
             hub.update(address, |s| {
                 for b in &batteries {
                     let absent = b.status == BatteryStatus::Disconnected;
@@ -248,7 +257,11 @@ async fn handle_event(
                         }
                         // No bud in the case: it can't report, keep its last reading
                         BatteryComponent::Case => {
-                            s.battery_case = if absent { s.battery_case.kept() } else { battery }
+                            if !absent {
+                                s.battery_case = battery;
+                            } else if !case_frame_live {
+                                s.battery_case = s.battery_case.kept();
+                            }
                         }
                     }
                 }

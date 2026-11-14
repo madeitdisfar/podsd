@@ -21,7 +21,7 @@ PipeWire + WirePlumber.
 
 | Feature | Notes |
 |---|---|
-| Battery: left, right, case, headset, charging | The case reports only while a bud is in it; otherwise its last reading is kept, with its time |
+| Battery: left, right, case, headset, charging | The case reports through a bud in it, or by itself while charging or just handled if it has its own radio (AirPods Pro 3; with `bleMonitor`); otherwise its last reading is kept, with its time |
 | Ear detection state | Per bud (primary / secondary): in ear, out of ear, in case |
 | Listening mode: Off, Transparency, Adaptive, Noise Cancellation | `ListeningModes` follows iOS: Off needs Off Listening Mode; with one bud in an ear, Adaptive and Noise Cancellation need Noise Cancellation with One AirPod |
 | Settings | Off Listening Mode, Noise Cancellation with One AirPod, Adaptive Audio level, Conversation Awareness, Personalized Volume, Automatic Ear Detection, Pause Media When Falling Asleep, Press Speed, Press and Hold Duration, Volume Swipe and its wait. See [Settings](#settings) |
@@ -144,7 +144,7 @@ Session bus, service `io.github.madeitdisfar.Podsd`.
 | `Ready` | b | the control channel is up; the properties below are live only then |
 | `BatteryLeft`, `BatteryRight`, `BatteryCase`, `BatteryHeadphone` | i | percent, -1 unknown |
 | `ChargingLeft`, `ChargingRight`, `ChargingCase`, `ChargingHeadphone` | b | |
-| `BatteryCaseLive`, `BatteryCaseTime` | b, x | the case reports only while a bud is in it; otherwise `BatteryCase` is the last reading (kept across restarts), taken at `BatteryCaseTime` (Unix seconds) |
+| `BatteryCaseLive`, `BatteryCaseTime` | b, x | the case reports while a bud is in it, or by itself while charging or for a moment after the lid or a bud moves (a case with its own radio, `bleMonitor`; read from AirPods Pro 3); otherwise `BatteryCase` is the last reading (kept across restarts), taken at `BatteryCaseTime` (Unix seconds) |
 | `CaseOpen` | b | the case's lid is open nearby (BLE adverts, see `bleMonitor`) |
 | `BatterySource` | s | `aacp`, `ble` (from adverts, while connected elsewhere) or `""` |
 | `EarPrimary`, `EarSecondary` | s | see above |
