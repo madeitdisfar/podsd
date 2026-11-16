@@ -196,6 +196,7 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
 
     {
         let hub = hub.clone();
+        let aacp = aacp.clone();
         let media = media.clone();
         let address = address.clone();
         let switcher = switcher.clone();
@@ -208,7 +209,7 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
                     tokio::spawn(async move { hub.on_channel_closed(&address).await });
                     break;
                 }
-                handle_event(&hub, &media, &switcher, &address, event).await;
+                handle_event(&hub, &aacp, &media, &switcher, &address, event).await;
             }
         }));
     }
@@ -228,6 +229,7 @@ fn ear_name(status: &EarDetectionStatus) -> &'static str {
 
 async fn handle_event(
     hub: &Hub,
+    aacp: &AACPManager,
     media: &MediaController,
     switcher: &Switcher,
     address: &str,
@@ -344,6 +346,14 @@ async fn handle_event(
             })
             .await;
             hub.sync_alias(address, &info.name, false).await;
+            // The information opens the AirPods' answer to the handshake. On
+            // a link that just came up it comes 0.8-1.7 s late, and the
+            // feature flags sent on the timer before it are lost: the AirPods
+            // then report Adaptive to this computer as 01 (Off) while they're
+            // in it. Sent again now they're listening (as Refresh does).
+            if let Err(e) = aacp.send_set_feature_flags_packet().await {
+                warn!("{}: sending the feature flags again failed: {}", address, e);
+            }
         }
         AACPEvent::ConnectedDevices(_, new_devices) => {
             // For a drop by a device joining before this computer was listed
