@@ -3,7 +3,7 @@
 
 use crate::bluetooth::aacp::{
     AACPEvent, AACPManager, AirPodsLEKeys, BatteryComponent, BatteryStatus,
-    ControlCommandIdentifiers, EarDetectionStatus, ProximityKeyType, StemPressBudType,
+    ControlCommandIdentifiers, ControlCommandStatus, EarDetectionStatus, ProximityKeyType, StemPressBudType,
     StemPressType,
 };
 use crate::hub::{Hub, Session};
@@ -18,6 +18,56 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, sleep};
 
 const CONNECT_ATTEMPTS: u32 = 3;
+
+/// How long the listening mode in the AirPods' answer to the handshake is
+/// held back, waiting for the one they report once the feature flags apply
+/// (0.2-0.5 s after it, 11-16)
+const ANSWER_MODE_HOLD: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Holds back the listening mode in the AirPods' answer to the handshake. It's
+/// read before the feature flags apply, so Adaptive shows in it as 01 (Off),
+/// and the right value follows once they do (sent again as the answer comes).
+/// Published as it was, the mode went from Off to Adaptive at every connect,
+/// which shells took for a switch. The answer's value counts only if nothing
+/// follows within ANSWER_MODE_HOLD.
+#[derive(Default)]
+struct AnswerMode {
+    /// The information came: the answer's listening mode is next
+    expecting: bool,
+    /// The answer's listening mode, and until when it's held
+    held: Option<(ControlCommandStatus, std::time::Instant)>,
+}
+
+impl AnswerMode {
+    /// Whether to handle the event now (false: held back)
+    fn admit(&mut self, event: &AACPEvent, now: std::time::Instant) -> bool {
+        match event {
+            // The answer opens with the information, then the listening mode
+            AACPEvent::Information(_) => self.expecting = true,
+            AACPEvent::ControlCommand(status) if status.identifier == ControlCommandIdentifiers::ListeningMode => {
+                if std::mem::take(&mut self.expecting) {
+                    self.held = Some((status.clone(), now + ANSWER_MODE_HOLD));
+                    return false;
+                }
+                // A newer report: the held one is stale
+                self.held = None;
+            }
+            // The answer went on without a listening mode
+            AACPEvent::ControlCommand(_) => self.expecting = false,
+            _ => {}
+        }
+        true
+    }
+
+    fn deadline(&self) -> Option<std::time::Instant> {
+        self.held.as_ref().map(|(_, until)| *until)
+    }
+
+    /// Nothing followed in time: the answer's value stands
+    fn release(&mut self) -> Option<AACPEvent> {
+        self.held.take().map(|(status, _)| AACPEvent::ControlCommand(status))
+    }
+}
 
 pub async fn start(hub: Hub, address: String) -> Option<Session> {
     let mac: Address = match address.parse() {
@@ -201,13 +251,33 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
         let address = address.clone();
         let switcher = switcher.clone();
         tasks.push(tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
+            let mut answer_mode = AnswerMode::default();
+            loop {
+                let deadline = answer_mode.deadline();
+                let event = tokio::select! {
+                    event = event_rx.recv() => match event {
+                        Some(event) => event,
+                        None => break,
+                    },
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(
+                        deadline.unwrap_or_else(std::time::Instant::now),
+                    )), if deadline.is_some() => {
+                        if let Some(event) = answer_mode.release() {
+                            debug!("{}: no listening mode after the feature flags; the handshake's stands", address);
+                            handle_event(&hub, &aacp, &media, &switcher, &address, event).await;
+                        }
+                        continue;
+                    }
+                };
                 if let AACPEvent::Disconnected = event {
                     // Stopping the session aborts this task, so hand it off.
                     let hub = hub.clone();
                     let address = address.clone();
                     tokio::spawn(async move { hub.on_channel_closed(&address).await });
                     break;
+                }
+                if !answer_mode.admit(&event, std::time::Instant::now()) {
+                    continue;
                 }
                 handle_event(&hub, &aacp, &media, &switcher, &address, event).await;
             }
@@ -337,6 +407,15 @@ async fn handle_event(
             }
         }
         AACPEvent::Information(info) => {
+            // The information opens the AirPods' answer to the handshake. On
+            // a link that just came up it comes 0.8-1.7 s late, and the
+            // feature flags sent on the timer before it are lost: the AirPods
+            // then report Adaptive to this computer as 01 (Off) while they're
+            // in it. Sent again now they're listening (as Refresh does), first
+            // thing, as the answer's own mode waits for them (AnswerMode).
+            if let Err(e) = aacp.send_set_feature_flags_packet().await {
+                warn!("{}: sending the feature flags again failed: {}", address, e);
+            }
             hub.update(address, |s| {
                 if !info.name.is_empty() {
                     s.name = info.name.clone();
@@ -346,14 +425,6 @@ async fn handle_event(
             })
             .await;
             hub.sync_alias(address, &info.name, false).await;
-            // The information opens the AirPods' answer to the handshake. On
-            // a link that just came up it comes 0.8-1.7 s late, and the
-            // feature flags sent on the timer before it are lost: the AirPods
-            // then report Adaptive to this computer as 01 (Off) while they're
-            // in it. Sent again now they're listening (as Refresh does).
-            if let Err(e) = aacp.send_set_feature_flags_packet().await {
-                warn!("{}: sending the feature flags again failed: {}", address, e);
-            }
         }
         AACPEvent::ConnectedDevices(_, new_devices) => {
             // For a drop by a device joining before this computer was listed
@@ -417,4 +488,64 @@ pub struct AirPodsInformation {
     pub right_serial_number: String,
     pub version3: String,
     pub le_keys: AirPodsLEKeys,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn mode(raw: u8) -> AACPEvent {
+        AACPEvent::ControlCommand(ControlCommandStatus { identifier: ControlCommandIdentifiers::ListeningMode, value: vec![raw] })
+    }
+
+    fn info() -> AACPEvent {
+        AACPEvent::Information(AirPodsInformation::default())
+    }
+
+    fn held_raw(a: &AnswerMode) -> Option<u8> {
+        a.held.as_ref().map(|(s, _)| s.value[0])
+    }
+
+    #[test]
+    fn the_answers_mode_waits_for_the_one_after_the_flags() {
+        // 11-16 12:50:48: the answer's 01, then 04 once the flags applied
+        let now = Instant::now();
+        let mut a = AnswerMode::default();
+        assert!(a.admit(&info(), now));
+        assert!(!a.admit(&mode(0x01), now));
+        assert_eq!(held_raw(&a), Some(0x01));
+        assert!(a.admit(&mode(0x04), now));
+        assert!(a.held.is_none() && a.release().is_none());
+        // Reports after that pass straight through
+        assert!(a.admit(&mode(0x03), now));
+    }
+
+    #[test]
+    fn the_answers_mode_stands_if_nothing_follows() {
+        let now = Instant::now();
+        let mut a = AnswerMode::default();
+        a.admit(&info(), now);
+        assert!(!a.admit(&mode(0x02), now));
+        assert_eq!(a.deadline(), Some(now + ANSWER_MODE_HOLD));
+        assert!(matches!(a.release(), Some(AACPEvent::ControlCommand(s)) if s.value == [0x02]));
+        assert!(a.deadline().is_none());
+    }
+
+    #[test]
+    fn only_the_mode_right_after_the_information_is_held() {
+        let now = Instant::now();
+        let mut a = AnswerMode::default();
+        // No answer yet: a report is a report
+        assert!(a.admit(&mode(0x04), now));
+        // An answer that goes on without a listening mode
+        a.admit(&info(), now);
+        let other = AACPEvent::ControlCommand(ControlCommandStatus {
+            identifier: ControlCommandIdentifiers::ClickHoldInterval,
+            value: vec![0],
+        });
+        assert!(a.admit(&other, now));
+        assert!(a.admit(&mode(0x03), now));
+        assert!(a.held.is_none());
+    }
 }
