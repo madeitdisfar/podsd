@@ -19,6 +19,10 @@ pub struct Config {
     pub takeover_on_play: bool,
     /// Lower the volume while Conversation Awareness says you're speaking.
     pub conversation_volume: bool,
+    /// How much the volume goes down as you speak, in dB...
+    pub conversation_cut: f64,
+    /// ...and the most it may then be, in percent.
+    pub conversation_ceiling: u32,
     /// Double press = next track, triple press = previous track, handled here.
     pub stem_control: bool,
     /// Restart WirePlumber when the AirPods have no A2DP profile. Restarting it
@@ -44,6 +48,8 @@ impl Default for Config {
             disconnect_when_not_wearing: false,
             takeover_on_play: true,
             conversation_volume: true,
+            conversation_cut: 15.0,
+            conversation_ceiling: 35,
             stem_control: false,
             restart_wireplumber: false,
             ble_monitor: true,

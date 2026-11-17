@@ -16,6 +16,9 @@
 //!   {"kind":"stemPress","address":"…","press":"double","bud":"left"}
 //!   {"kind":"movedTo","address":"…","name":"iPhone","reversed":false}
 //!     another device took the AirPods; reversed: its user moved them back
+//!   {"kind":"conversationVolume","address":"…","ms":750}
+//!     podsd is about to change the volume for Conversation Awareness, over
+//!     the next ms (0: at once): not the user's change
 //!
 //! A battery level is null when unknown. Exits when stdout closes.
 
@@ -232,32 +235,15 @@ async fn watch(conn: &Connection) -> zbus::Result<()> {
     emit(&mut out, &last);
 
     while let Some(msg) = stream.next().await {
-        let mut pending = vec![msg];
-        // Changes come in bursts (one per property); answer the burst once.
-        while let Ok(Some(more)) = tokio::time::timeout(Duration::from_millis(40), stream.next()).await {
-            pending.push(more);
+        // Signals go out as they come (a shell hides the volume OSD on
+        // conversationVolume, which must beat PipeWire's own news); state
+        // changes come in bursts (one per property): answer the burst once.
+        if let Ok(msg) = &msg {
+            signal_line(&mut out, msg);
         }
-        for msg in pending.into_iter().flatten() {
-            let header = msg.header();
-            if header.member().map(|m| m.as_str()) == Some("MovedTo")
-                && let Ok((name, reversed)) = msg.body().deserialize::<(String, bool)>()
-            {
-                let path = header.path().map(|p| p.to_string()).unwrap_or_default();
-                let address = path.rsplit("/dev_").next().unwrap_or_default().replace('_', ":");
-                emit(
-                    &mut out,
-                    &json!({ "kind": "movedTo", "address": address, "name": name, "reversed": reversed }),
-                );
-            }
-            if header.member().map(|m| m.as_str()) == Some("StemPress")
-                && let Ok((press, bud)) = msg.body().deserialize::<(String, String)>()
-            {
-                let path = header.path().map(|p| p.to_string()).unwrap_or_default();
-                let address = path.rsplit("/dev_").next().unwrap_or_default().replace('_', ":");
-                emit(
-                    &mut out,
-                    &json!({ "kind": "stemPress", "address": address, "press": press, "bud": bud }),
-                );
+        while let Ok(Some(more)) = tokio::time::timeout(Duration::from_millis(40), stream.next()).await {
+            if let Ok(msg) = &more {
+                signal_line(&mut out, msg);
             }
         }
         let now = snapshot(conn).await;
@@ -267,6 +253,35 @@ async fn watch(conn: &Connection) -> zbus::Result<()> {
         }
     }
     Ok(())
+}
+
+/// A device signal as its JSON line (state changes go by the snapshot)
+fn signal_line(out: &mut std::io::Stdout, msg: &zbus::Message) {
+    let header = msg.header();
+    let member = header.member().map(|m| m.as_str().to_string());
+    let path = header.path().map(|p| p.to_string()).unwrap_or_default();
+    let address = path.rsplit("/dev_").next().unwrap_or_default().replace('_', ":");
+    let line = match member.as_deref() {
+        Some("MovedTo") => msg
+            .body()
+            .deserialize::<(String, bool)>()
+            .ok()
+            .map(|(name, reversed)| json!({ "kind": "movedTo", "address": address, "name": name, "reversed": reversed })),
+        Some("StemPress") => msg
+            .body()
+            .deserialize::<(String, String)>()
+            .ok()
+            .map(|(press, bud)| json!({ "kind": "stemPress", "address": address, "press": press, "bud": bud })),
+        Some("ConversationVolume") => msg
+            .body()
+            .deserialize::<u32>()
+            .ok()
+            .map(|ms| json!({ "kind": "conversationVolume", "address": address, "ms": ms })),
+        _ => None,
+    };
+    if let Some(line) = line {
+        emit(out, &line);
+    }
 }
 
 fn fmt_battery(b: &Json) -> Option<String> {

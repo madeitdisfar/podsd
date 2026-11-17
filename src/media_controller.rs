@@ -90,8 +90,26 @@ struct Lowered {
     applied: u32,
 }
 
+/// Tells clients podsd is about to change the volume for a conversation,
+/// over the next so many ms (the ConversationVolume signal), so a shell
+/// doesn't show it as the user's change
+pub type VolumeNotice = Arc<dyn Fn(u32) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+
+/// The notice goes this long before the change: clients get it through
+/// `podsctl watch`, PipeWire's own news of the change more directly
+const NOTICE_LEAD: Duration = Duration::from_millis(30);
+
+async fn announce(notice: &Option<VolumeNotice>, ms: u32) {
+    if let Some(notice) = notice {
+        notice(ms).await;
+        tokio::time::sleep(NOTICE_LEAD).await;
+    }
+}
+
 #[derive(Default)]
 struct Conversation {
+    lowering: conversation::Lowering,
+    notice: Option<VolumeNotice>,
     lowered: Option<Lowered>,
     /// The user set the volume during this conversation: theirs stands until it ends
     user_took_over: bool,
@@ -199,6 +217,12 @@ impl MediaController {
             let this = self.clone();
             tokio::spawn(async move { this.restore_left_over(Duration::from_secs(10)).await });
         }
+    }
+
+    pub async fn set_conversation(&self, lowering: conversation::Lowering, notice: VolumeNotice) {
+        let mut conv = self.conv.lock().await;
+        conv.lowering = lowering;
+        conv.notice = Some(notice);
     }
 
     pub async fn set_options(&self, disconnect_when_not_wearing: bool, restart_wireplumber: bool) {
@@ -795,6 +819,7 @@ impl MediaController {
         let mut conv = self.conv.lock().await;
         conv.generation += 1;
         let generation = conv.generation;
+        let (lowering, notice) = (conv.lowering, conv.notice.clone());
         if step == Step::End {
             conv.user_took_over = false;
         }
@@ -824,7 +849,7 @@ impl MediaController {
         }
 
         match step {
-            Step::Lower(share) => {
+            Step::Lower(depth) => {
                 if conv.user_took_over {
                     debug!("The user set the volume during this conversation; leaving it");
                     return;
@@ -836,32 +861,36 @@ impl MediaController {
                     conv.lowered = Some(lowered);
                 }
                 let lowered = conv.lowered.as_mut().expect("set above");
-                let target = conversation::scaled(lowered.original, share);
-                if target < lowered.applied && set_sink_volume(&lowered.sink, target).await {
-                    info!(
-                        "Conversation Awareness {}: volume {} -> {} ({}% of {})",
-                        level, lowered.applied, target, share, lowered.original
-                    );
-                    lowered.applied = target;
+                let target = conversation::target(lowered.original, depth, lowering);
+                if target < lowered.applied {
+                    announce(&notice, 0).await;
+                    if set_sink_volume(&lowered.sink, target).await {
+                        info!(
+                            "Conversation Awareness {}: volume {} -> {} (from {})",
+                            level, lowered.applied, target, lowered.original
+                        );
+                        lowered.applied = target;
+                    }
                 }
             }
-            Step::Partial(share) => {
+            Step::Partial(depth) => {
                 let Some(lowered) = conv.lowered.as_mut() else {
                     return;
                 };
-                let target = conversation::scaled(lowered.original, share);
+                let target = conversation::target(lowered.original, depth, lowering);
                 if target < lowered.applied {
+                    announce(&notice, 0).await;
                     if set_sink_volume(&lowered.sink, target).await {
                         info!(
-                            "Conversation Awareness {}: volume {} -> {} ({}% of {})",
-                            level, lowered.applied, target, share, lowered.original
+                            "Conversation Awareness {}: volume {} -> {} (from {})",
+                            level, lowered.applied, target, lowered.original
                         );
                         lowered.applied = target;
                     }
                 } else if target > lowered.applied {
                     info!(
-                        "Conversation Awareness {}: volume {} -> {} ({}% of {}), fading",
-                        level, lowered.applied, target, share, lowered.original
+                        "Conversation Awareness {}: volume {} -> {} (from {}), fading",
+                        level, lowered.applied, target, lowered.original
                     );
                     drop(conv);
                     self.fade(generation, target, false);
@@ -935,6 +964,10 @@ impl MediaController {
                     Some(_) => {}
                 }
             }
+            if stride.is_none() {
+                let ms = conversation::FADE_STEPS * conversation::FADE_STEP.as_millis() as u32;
+                announce(&conv.notice, ms).await;
+            }
             let stride = *stride.get_or_insert_with(|| conversation::stride(lowered.applied, target));
             let next = conversation::next_up(lowered.applied, target, stride);
             if !set_sink_volume(&lowered.sink, next).await {
@@ -965,21 +998,23 @@ impl MediaController {
         let Some(lowered) = conv.lowered.take() else {
             return;
         };
-        match sink_volume(&lowered.sink).await {
-            Some(current) if conversation::changed_by_someone_else(current, lowered.applied) => {
+        let notice = conv.notice.clone();
+        if let Some(current) = sink_volume(&lowered.sink).await {
+            if conversation::changed_by_someone_else(current, lowered.applied) {
                 info!("{}: the volume was set to {} meanwhile (podsd had {}); it stays", why, current, lowered.applied);
+                return;
             }
-            Some(_) if set_sink_volume(&lowered.sink, lowered.original).await => {
+            announce(&notice, 0).await;
+            if set_sink_volume(&lowered.sink, lowered.original).await {
                 info!("{}: volume {} -> {}", why, lowered.applied, lowered.original);
-            }
-            _ => {
-                info!(
-                    "{}: the AirPods' sink is gone; their volume goes back to {} when it's here again",
-                    why, lowered.original
-                );
-                left_over(&mac, &lowered);
+                return;
             }
         }
+        info!(
+            "{}: the AirPods' sink is gone; their volume goes back to {} when it's here again",
+            why, lowered.original
+        );
+        left_over(&mac, &lowered);
     }
 
     /// Puts back a volume a conversation left lowered as the AirPods' sink
@@ -1006,6 +1041,8 @@ impl MediaController {
         };
         match sink_volume(&sink).await {
             Some(current) if !conversation::changed_by_someone_else(current, lowered) => {
+                let notice = self.conv.lock().await.notice.clone();
+                announce(&notice, 0).await;
                 if set_sink_volume(&sink, original).await {
                     info!("The AirPods' sink is back: volume {} -> {}, as before the conversation", current, original);
                 }

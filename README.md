@@ -30,7 +30,7 @@ PipeWire + WirePlumber.
 | Case opened nearby (`CaseOpen`) | From BLE adverts (`bleMonitor`, needs BlueZ's experimental mode); clients show a popup |
 | Battery while connected elsewhere | From BLE adverts, decrypted with the pair's key |
 | Pause / resume media when a bud comes out / goes back | `earPause`; LibrePods' logic |
-| Lower the volume while you speak (Conversation Awareness) | `conversationVolume`. The music follows the AirPods' levels: down to a quarter of your volume as you speak, partly back as you pause, faded back when the conversation is over. A volume you set meanwhile stays; calls aren't touched |
+| Lower the volume while you speak (Conversation Awareness) | `conversationVolume`. The music follows the AirPods' levels: down 15 dB as you speak (and to no more than 35%), partly back as you pause, faded back when the conversation is over. A volume you set meanwhile stays; calls aren't touched. Clients can hide these changes from their volume OSD (`ConversationVolume`) |
 | Switching with an Apple device: shared connection, automatic takeover on playback, Move back | Needs Apple's Device ID; see [Switching between devices](#switching-between-devices) |
 | Stem presses: play / pause, next, previous | The AirPods do it themselves over AVRCP, given `mpris-proxy` (see Install). `stemControl` instead has them report double / triple presses to podsd (`StemPress` signal), which skips tracks itself |
 | Keep the audio codec | Turns a switched-off audio profile back on, preferring AAC |
@@ -118,6 +118,7 @@ keeps the last one. A new `state` line comes on every change, and when podsd sta
   "listeningMode":"noise-cancellation","ownsAudio":false,
   "settings":{"conversation-awareness":false,"one-bud-anc":false,"press-speed":"default","…":"…"}}]}
 {"kind":"stemPress","address":"AA:BB:CC:DD:EE:FF","press":"double","bud":"left"}
+{"kind":"conversationVolume","address":"AA:BB:CC:DD:EE:FF","ms":750}
 ```
 
 `level` is `null` when unknown. `connected`: BlueZ has them; `ready`: the control channel is up
@@ -175,6 +176,10 @@ with Move back (`MoveHere`).
 
 Signal `StemPress(s press, s bud)`: press `single`/`double`/`triple`/`long`, bud
 `left`/`right`. The AirPods report presses only when asked to (`stemControl` in the config).
+
+Signal `ConversationVolume(u ms)`: podsd is about to change the volume for Conversation
+Awareness, over the next `ms` milliseconds (`0`: at once). It comes 30 ms before the change,
+so a shell can leave it out of its volume OSD.
 
 From a shell:
 
@@ -262,6 +267,8 @@ Every key is optional:
   "disconnectWhenNotWearing": false,
   "takeoverOnPlay": true,
   "conversationVolume": true,
+  "conversationCut": 15,
+  "conversationCeiling": 35,
   "stemControl": false,
   "restartWireplumber": false,
   "bleMonitor": true,
@@ -276,6 +283,8 @@ Every key is optional:
 | `disconnectWhenNotWearing` | switch the AirPods' audio profile off while neither is worn |
 | `takeoverOnPlay` | when audio starts playing here with an AirPod in, take the AirPods over from the other device (needs Apple's Device ID; see [Switching between devices](#switching-between-devices)) |
 | `conversationVolume` | lower the volume while Conversation Awareness hears you speak |
+| `conversationCut` | how far, in dB (the volume percent is cubic: 50% is −18 dB) |
+| `conversationCeiling` | the most the volume may then be, in percent, however loud it was |
 | `stemControl` | double press: next track, triple press: previous track |
 | `restartWireplumber` | restart WirePlumber when the AirPods have no A2DP profile (cuts all audio for a moment) |
 | `bleMonitor` | watch the AirPods' BLE adverts: `CaseOpen`, the case's battery, battery while connected elsewhere. Needs `Experimental = true` under `[General]` in `/etc/bluetooth/main.conf` (then `systemctl restart bluetooth`); BlueZ filters for Apple's adverts, so nothing scans actively. Without it, nothing happens |

@@ -15,6 +15,9 @@ Singleton {
     readonly property var current: devices.find(d => d.ready) ?? devices.find(d => d.connected) ?? null
 
     signal stemPress(string address, string press, string bud)
+    // podsd is about to change the volume for Conversation Awareness, over the
+    // next ms: a volume OSD can leave it out
+    signal conversationVolume(string address, int ms)
 
     function podsctl(args) {
         const device = root.current ? ["-d", root.current.address] : [];
@@ -45,6 +48,8 @@ Singleton {
                     root.devices = msg.devices;
                 } else if (msg.kind === "stemPress") {
                     root.stemPress(msg.address, msg.press, msg.bud);
+                } else if (msg.kind === "conversationVolume") {
+                    root.conversationVolume(msg.address, msg.ms);
                 }
             }
         }

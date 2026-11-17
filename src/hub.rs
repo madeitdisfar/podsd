@@ -956,6 +956,15 @@ impl Hub {
         }
     }
 
+    pub async fn emit_conversation_volume(&self, address: &str, ms: u32) {
+        let path = device_path(address);
+        if let Ok(emitter) = SignalEmitter::new(&self.0.conn, path.as_str())
+            && let Err(e) = DeviceIface::conversation_volume(&emitter, ms).await
+        {
+            warn!("Failed to emit ConversationVolume: {}", e);
+        }
+    }
+
     pub async fn emit_stem_press(&self, address: &str, press: &str, bud: &str) {
         let path = device_path(address);
         if let Ok(emitter) = SignalEmitter::new(&self.0.conn, path.as_str())

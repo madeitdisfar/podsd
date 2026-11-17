@@ -155,6 +155,18 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
     media
         .set_options(config.disconnect_when_not_wearing, config.restart_wireplumber)
         .await;
+    {
+        let lowering = crate::conversation::Lowering {
+            cut_db: config.conversation_cut.clamp(0.0, 60.0),
+            ceiling: config.conversation_ceiling.min(100),
+        };
+        let (hub, address) = (hub.clone(), address.clone());
+        let notice: crate::media_controller::VolumeNotice = std::sync::Arc::new(move |ms| {
+            let (hub, address) = (hub.clone(), address.clone());
+            Box::pin(async move { hub.emit_conversation_volume(&address, ms).await })
+        });
+        media.set_conversation(lowering, notice).await;
+    }
 
     let mut tasks = Vec::new();
 

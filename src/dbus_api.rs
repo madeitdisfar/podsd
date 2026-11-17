@@ -323,6 +323,11 @@ impl DeviceIface {
         self.bluez_call("Disconnect").await
     }
 
+    /// podsd is about to change the volume for Conversation Awareness, over
+    /// the next `ms` milliseconds (0: at once): not the user's change
+    #[zbus(signal)]
+    pub async fn conversation_volume(emitter: &SignalEmitter<'_>, ms: u32) -> zbus::Result<()>;
+
     /// A stem press: press "single" | "double" | "triple" | "long", bud "left" | "right".
     /// The AirPods only report presses podsd asked for (stemControl in the config).
     #[zbus(signal)]
