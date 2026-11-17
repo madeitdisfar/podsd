@@ -14,8 +14,8 @@ and tray and adds the D-Bus API and the fixes listed below.
 
 ## Status
 
-Tested with AirPods Pro 3 (A3064, firmware 90.3431000025000000.6807) on CachyOS, BlueZ 5.87,
-PipeWire + WirePlumber.
+Tested with AirPods Pro 3 (A3064, firmware 91.3431046004000000.29) on CachyOS, BlueZ 5.88,
+PipeWire 1.6 + WirePlumber.
 
 ### Available
 
@@ -35,7 +35,7 @@ PipeWire + WirePlumber.
 | Stem presses: play / pause, next, previous | The AirPods do it themselves over AVRCP, given `mpris-proxy` (see Install). `stemControl` instead has them report double / triple presses to podsd (`StemPress` signal), which skips tracks itself |
 | Keep the audio codec | Turns a switched-off audio profile back on, preferring AAC |
 
-LibrePods' logic in the last rows works but hasn't been re-tested in every case here.
+Rows marked "LibrePods' logic" work but haven't been re-tested in every case here.
 
 ### Not available
 
@@ -118,6 +118,7 @@ keeps the last one. A new `state` line comes on every change, and when podsd sta
   "listeningMode":"noise-cancellation","ownsAudio":false,
   "settings":{"conversation-awareness":false,"one-bud-anc":false,"press-speed":"default","…":"…"}}]}
 {"kind":"stemPress","address":"AA:BB:CC:DD:EE:FF","press":"double","bud":"left"}
+{"kind":"movedTo","address":"AA:BB:CC:DD:EE:FF","name":"iPhone","reversed":false}
 {"kind":"conversationVolume","address":"AA:BB:CC:DD:EE:FF","ms":750}
 ```
 
@@ -166,7 +167,7 @@ when the AirPods apply it:
 | `SetSetting(s key, v value)` | value: `b` for bool settings, `s` for choices, `i` for ints |
 | `DescribeSettings() → a(sssasii)` | (key, type `bool`/`choice`/`int`, label, choices, min, max) |
 | `Rename(s name)` | |
-| `Refresh()` | asks the AirPods to report their settings again (podsd also does this once by itself when they haven't 3 s after connecting). Right after a switch from another device, AirPods Pro 3 report nothing for about 30 s whatever is sent; `ListeningMode` is `""` meanwhile |
+| `Refresh()` | asks the AirPods to report their settings again (podsd also asks by itself 3, 10 and 30 s after connecting while settings or notifications are missing). Right after a switch from another device, AirPods Pro 3 report nothing for about 30 s whatever is sent; `ListeningMode` is `""` meanwhile |
 | `Connect()`, `Disconnect()` | through BlueZ |
 | `MoveHere()` | takes the AirPods over from the other device (see [Switching between devices](#switching-between-devices)) |
 
@@ -237,8 +238,12 @@ podsd follows LibrePods' Android app here:
   profile off (so sound doesn't go to AirPods in use elsewhere) and emits `MovedTo`. It doesn't
   take them back by itself for 3 s, and not at all after the other device's user tapped "Move
   back", until `MoveHere()`.
+- **Taking back what the AirPods hand over by themselves**: when an AirPod goes in with none
+  worn, or the other device rejoins within 15 s of being let go, the AirPods give it the audio
+  whatever this computer says. podsd takes it back if that happens within 3 s.
 - podsd tells the other device whenever playback here starts or stops, and gives up the
-  audio when the AirPods report the other device playing.
+  audio when the AirPods report the other device playing (only until they first report who
+  owns it; after that, a real takeover always comes with that report).
 - Pausing (when an AirPod comes out, or another device takes them) and resuming after a
   takeover only touch players that play audio here (their process, or one it started, has an
   audio stream). A remote control such as Spotify Connect reports Playing while the phone
@@ -301,8 +306,9 @@ Found by running it against AirPods Pro 3 and reading the code:
 - **The audio profile was switched off at startup.** The first ear detection report was treated
   as a removal, so with the buds in their case it paused media and set the card profile to
   `off`, which WirePlumber then remembers: the AirPods came back silent next time. The first
-  report is now only a baseline, `disconnectWhenNotWearing` is off by default, and a session
-  turns an `off` profile back on when it starts and when it ends.
+  report is now only a baseline and `disconnectWhenNotWearing` is off by default. A session
+  sets the profile once it knows who has the audio (`off` only while another device has it),
+  and the daemon turns an `off` profile back on as it exits.
 - **The codec was downgraded when audio came back.** It picked SBC-XQ before `a2dp-sink`
   (AAC on AirPods); AAC now comes first, and the profile in use before switching off is restored.
 - **Deadlock with a phone connected** (librepods PR #896 by smoothxhale): the playback listener
@@ -317,6 +323,13 @@ Found by running it against AirPods Pro 3 and reading the code:
 - **Sessions leaked across reconnects:** the AACP tasks and the playback listener ran forever
   after a disconnect; they now stop with the session.
 - **WirePlumber restarts** are opt-in (`restartWireplumber`).
+- **Adaptive read as Off.** The feature flags went on a timer after the handshake, and on a
+  fresh link the AirPods answer it late and drop them; without them they report Adaptive as
+  Off. The flags now go again as the answer arrives, and the answer's own listening mode
+  (read before the flags apply) waits for the one after it.
+- **Conversation Awareness's volume** treated the AirPods' levels as events: it lowered to a
+  fixed 25% / 15%, ignored some levels and could leave the volume low. It now follows them as
+  targets (see Available).
 - BLE monitor: a failed `bluetoothctl connect` no longer blocks later attempts (as in PR #877),
   and a duplicate attempt no longer ends the advert watcher.
 
