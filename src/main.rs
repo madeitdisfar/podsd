@@ -261,7 +261,7 @@ async fn log_disconnect_reasons(hub: Hub) {
     while let Some(Ok(msg)) = stream.next().await {
         let header = msg.header();
         let Some(path) = header.path() else { continue };
-        // /org/bluez/hci0/dev_20_52_1D_6F_70_76
+        // /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
         let Some(address) = path.as_str().rsplit('/').next().and_then(|d| d.strip_prefix("dev_")) else {
             continue;
         };
