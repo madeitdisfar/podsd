@@ -28,6 +28,14 @@ install -Dm644 dist/io.github.madeitdisfar.Podsd.service "$dbus/io.github.madeit
 systemctl --user daemon-reload
 systemctl --user enable podsd.service
 systemctl --user restart podsd.service
+# A `podsctl watch` started before this keeps running the old binary, which
+# may not know newer signals. Stop those: clients restart it on exit (as
+# examples/quickshell/Pods.qml does).
+for pid in $(pgrep -f "podsctl watch" || true); do
+    if [[ "$(readlink "/proc/$pid/exe" 2>/dev/null)" == *"(deleted)" ]]; then
+        kill "$pid" && echo "restarting an old podsctl watch ($pid)"
+    fi
+done
 # BlueZ's mpris-proxy tells the AirPods what's playing here. Without it they
 # only ever send "play", so a double or triple press can't skip tracks.
 if systemctl --user cat mpris-proxy.service >/dev/null 2>&1; then
