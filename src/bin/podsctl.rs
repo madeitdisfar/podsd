@@ -14,7 +14,7 @@
 //! battery.case also has "live" (false: the last reading, kept while no bud is
 //! in the case) and "time" (when it was read, Unix seconds).
 //!   {"kind":"stemPress","address":"…","press":"double","bud":"left"}
-//!   {"kind":"movedTo","address":"…","name":"iPhone","reversed":false}
+//!   {"kind":"movedTo","address":"…","name":"another device","reversed":false}
 //!     another device took the AirPods; reversed: its user moved them back
 //!   {"kind":"conversationVolume","address":"…","ms":750}
 //!     podsd is about to change the volume for Conversation Awareness, over
@@ -149,7 +149,8 @@ fn device_json(props: &Props) -> Json {
         // the modes it can switch to now
         "listeningModes": get(props, "ListeningModes"),
         "ownsAudio": get(props, "OwnsAudio"),
-        // the other device sharing the AirPods ("iPhone", …), "" when none
+        // the other device sharing the AirPods, "" when none: "another device",
+        // or "iPhone" / "iPad" / "Mac" if it said so (an iPhone never does)
         "otherDevice": get(props, "OtherDevice"),
         // podsd is getting the AirPods back after they let this computer go
         // for another device: shells keep showing them as they were

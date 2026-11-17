@@ -118,7 +118,7 @@ keeps the last one. A new `state` line comes on every change, and when podsd sta
   "listeningMode":"noise-cancellation","ownsAudio":false,
   "settings":{"conversation-awareness":false,"one-bud-anc":false,"press-speed":"default","…":"…"}}]}
 {"kind":"stemPress","address":"AA:BB:CC:DD:EE:FF","press":"double","bud":"left"}
-{"kind":"movedTo","address":"AA:BB:CC:DD:EE:FF","name":"iPhone","reversed":false}
+{"kind":"movedTo","address":"AA:BB:CC:DD:EE:FF","name":"another device","reversed":false}
 {"kind":"conversationVolume","address":"AA:BB:CC:DD:EE:FF","ms":750}
 ```
 
@@ -153,7 +153,7 @@ Session bus, service `io.github.madeitdisfar.Podsd`.
 | `InEar` | b | at least one bud in an ear |
 | `ListeningMode` | s | `off`, `transparency`, `adaptive`, `noise-cancellation` |
 | `ListeningModes` | as | the modes `SetListeningMode` takes now: Off only with `allow-off-mode`; with one bud in an ear, noise cancellation and Adaptive only with `one-bud-anc` (as on iOS) |
-| `OtherDevice` | s | the other device sharing the AirPods (`iPhone`, `iPad`, `Mac`, `another device`), `""` when none |
+| `OtherDevice` | s | the other device sharing the AirPods, `""` when none. `iPhone`, `iPad` or `Mac` only when that device says what it is (smart routing messages); when it does not, it shows as `another device`. `MovedTo`'s name is the same |
 | `OwnsAudio` | b | this computer has the AirPods' audio (not the phone) |
 | `Reconnecting` | b | the AirPods let this computer go while another device had the audio (they do when the main bud leaves an ear) and podsd is connecting again, a few seconds; set in the same change that ends `Ready`, so a shell can keep showing the AirPods as they were. Clears once they're ready again or podsd gives up |
 | `Settings` | a{sv} | every setting the AirPods reported, by key |
