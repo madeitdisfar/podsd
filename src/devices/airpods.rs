@@ -21,7 +21,7 @@ const CONNECT_ATTEMPTS: u32 = 3;
 
 /// How long the listening mode in the AirPods' answer to the handshake is
 /// held back, waiting for the one they report once the feature flags apply
-/// (0.2-0.5 s after it, 11-16)
+/// (0.2-0.5 s after it, C-55)
 const ANSWER_MODE_HOLD: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Holds back the listening mode in the AirPods' answer to the handshake. It's
@@ -174,8 +174,8 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
 
     // If the handshake got lost, asking once more brings the settings at once.
     // After a switch from another device (a phone), though, the AirPods hold
-    // their settings back for about 30 s whatever is sent (seen twice: retries
-    // at 2, 5, 10 and 20 s were all ignored); clients show the listening mode
+    // their settings back for about 30 s whatever is sent (retries at 2, 5,
+    // 10 and 20 s were all ignored, B6); clients show the listening mode
     // as unknown until it arrives. The notification request can be lost on its
     // own too: when the AirPods are busy with another device as this one
     // connects, they answer the handshake seconds late and drop the request
@@ -206,9 +206,8 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
     }
 
     // Sometimes the AirPods take the channel and then never say anything on it,
-    // whatever is asked (3 times so far, the last 2026-11-08 16:56: 30 s of
-    // silence through three requests; once they dropped this computer after
-    // 76 s). A new channel on the same link answers at once.
+    // whatever is asked, even through three requests over 30 s (B23). A new
+    // channel on the same link answers at once.
     {
         let aacp = aacp.clone();
         let hub = hub.clone();
@@ -392,7 +391,7 @@ async fn handle_event(
             if config.ear_pause && enabled {
                 // The first report after connecting is where the buds already
                 // are, not a bud going in: claiming then sent OwnsConnection at
-                // every connect (11-13 19:48:21)
+                // every connect (C-45)
                 let first = old.is_empty();
                 media.handle_ear_detection(old, new).await;
                 // After the pause / resume above, so the claim comes with playback

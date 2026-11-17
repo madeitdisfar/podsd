@@ -112,9 +112,8 @@ impl Advert {
 /// A case's own advert: `07 11 06` and one block encrypted with its pair's key,
 /// which decrypts to `?? ?? ?? [case] [left] [right] ?? ?? 00 00 00 00 [seconds,
 /// 4 bytes]`, each battery byte as in the buds' adverts (bit 7 charging, the rest
-/// the level, `ff` absent). Read from AirPods Pro 3 (2026-11-14; the case and the
-/// right bud matched the iPhone and podsd's own reports); other models' cases
-/// may differ, and then nothing matches.
+/// the level, `ff` absent). Read from AirPods Pro 3, matched against the
+/// iPhone (B30); other models' cases may differ, and then nothing matches.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CaseAdvert {
     pub case: (i32, bool),

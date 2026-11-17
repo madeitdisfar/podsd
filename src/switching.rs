@@ -76,8 +76,8 @@ const HOST_LISTED: u8 = 0x01;
 const HOST_PLAYS: u8 = 0x02;
 /// The same priority list again only after this; at most so many a minute.
 /// Each change of owner sends one (the playing host goes first), so a cap per
-/// session ran out in busy ones (8 by 11:04 on 11-13; the main AirPod
-/// changing after that left this computer unlisted for good)
+/// session ran out in busy ones (the main AirPod changing after that left
+/// this computer unlisted for good, C-34)
 const LIST_REPEAT: Duration = Duration::from_secs(2);
 const LISTS_PER_MINUTE: usize = 6;
 
@@ -92,8 +92,8 @@ const DEVICE_DISCONNECTED: u8 = 0;
 /// 0.14-1.2 s after either)
 const RECLAIM_WINDOW: Duration = Duration::from_secs(3);
 /// The other device back this soon after the AirPods let it go rejoined by
-/// itself (1-7 s seen, 10 times); later, it's the user picking the AirPods
-/// on it (68 s, 11-13 20:04), and it keeps what it takes
+/// itself (within seconds); later, it's the user picking the AirPods on it,
+/// and it keeps what it takes (C-47)
 const REJOIN_WINDOW: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
@@ -232,7 +232,7 @@ impl Switcher {
             st.greeted.extend(new.iter().cloned());
             // B27: as the main AirPod changes with a bud worn, the AirPods let
             // the other device go, and give it the audio 0.25-1.2 s after it
-            // rejoins, whatever this computer told it (8 of 8 times)
+            // rejoins, whatever this computer told it
             let rejoined = !new.is_empty() && st.other_left_at.take().is_some_and(|t| t.elapsed() < REJOIN_WINDOW);
             if rejoined && st.owned {
                 info!("{}: the other device rejoined: taking the audio back if the AirPods hand it over", self.address);
@@ -242,9 +242,8 @@ impl Switcher {
         };
         let local_mac = self.hub.local_mac().to_string();
         // A device rejoining while this computer played heard "not streaming"
-        // and took the audio 0.25-0.65 s later (4 of 4 times, 2026-11-11/12;
-        // and 11-13 19:58:53, when the greeting went by the pause ear
-        // detection had just made)
+        // and took the audio 0.25-0.65 s later, also when the greeting went
+        // by the pause ear detection had just made (B25)
         let was_active = self.state.lock().await.was_active;
         let streaming = self.streaming(was_active).await;
         for mac in new {
@@ -350,11 +349,11 @@ impl Switcher {
     /// When one goes in with none worn, the AirPods give the audio to the
     /// other device (B7, every time with an iPhone), so podsd takes it back if
     /// they do. Claiming it first didn't stop them (handed over 0.14 s after
-    /// the claim, 11-13 20:11:58), so nothing is sent beforehand. Whatever
-    /// made this computer the owner while no AirPod was in an ear counts:
-    /// owning at removal, or "Use here" with both in the case (handed over
-    /// 1.9 s after one went in, 2026-11-08). Another device taking them
-    /// meanwhile ends the ownership, so then the AirPods stay with it.
+    /// the claim, C-47), so nothing is sent beforehand. Whatever made this
+    /// computer the owner while no AirPod was in an ear counts: owning at
+    /// removal, or "Use here" with both in the case (C-25). Another device
+    /// taking them meanwhile ends the ownership, so then the AirPods stay
+    /// with it.
     pub async fn on_ear(&self, was_in: bool, any_in: bool) {
         if was_in || !any_in {
             return;
@@ -450,10 +449,10 @@ impl Switcher {
     pub async fn on_audio_source(&self, mac: &str, kind: AudioSourceType) {
         let local = self.hub.local_mac().to_ascii_uppercase();
         // Only before any ownership report. After one, every real takeover
-        // came with OwnsConnection 00 (25 of 25, 11-11 to 11-13), and the
-        // iPhone's audio reports while this computer owned the audio came
-        // only right after a take-back: giving up on one (11-12 15:30:09) is
-        // what made the AirPods' stream fail and BlueZ end the link. Not
+        // came with OwnsConnection 00, and the iPhone's audio reports while
+        // this computer owned the audio came only right after a take-back:
+        // giving up on one is what made the AirPods' stream fail and BlueZ
+        // end the link (C-47). Not
         // owning, there's nothing to give up either: the iPhone reports its
         // audio again and again while it plays (hundreds of times an hour).
         let reported = self.state.lock().await.reported;
@@ -555,9 +554,9 @@ impl Switcher {
     /// while another device has the audio; otherwise on, as WirePlumber
     /// remembers the "off" podsd set last time, and the AirPods connecting
     /// alone and worn then played nothing here.
-    /// The card can come before the AirPods say who has the audio (the audio
-    /// link at 11-13 20:45:29, the device list 20:45:32): deciding then would turn the
-    /// audio on here, and off again a moment later, while the iPhone has it.
+    /// The card can come before the AirPods say who has the audio (3 s
+    /// before the device list, C-48): deciding then would turn the audio on
+    /// here, and off again a moment later, while the iPhone has it.
     /// So this waits for the first word on ownership, a little while; alone,
     /// the AirPods may never give one, and then the audio is this computer's.
     pub async fn on_card(&self) {
@@ -582,7 +581,7 @@ impl Switcher {
     pub async fn run(self, automatic: bool, apple_id: bool) {
         // What plays here as the session starts was playing already: it isn't
         // playback starting. Counted as that, sound on the speakers took the
-        // AirPods from the iPhone 0.3 s into every reconnect (11-14 00:02:02)
+        // AirPods from the iPhone 0.3 s into every reconnect (C-52)
         let playing = tokio::task::spawn_blocking(local_audio_active_sync).await.unwrap_or(false);
         self.state.lock().await.was_active = playing;
         loop {

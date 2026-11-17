@@ -155,7 +155,7 @@ impl DeviceState {
     /// leaves an ear, or some seconds after both are out, and an iPhone
     /// reconnects 1–2 s later. Only while an AirPod is worn or in a hand:
     /// with both in the case they're being put away, and as the lid closes the
-    /// second reads "disconnected" before they power off (11:58:40).
+    /// second reads "disconnected" before they power off (C-29).
     pub fn released_for_other(&self) -> bool {
         let out = |e: &str| e == "in-ear" || e == "out-of-ear";
         self.ready

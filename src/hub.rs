@@ -41,12 +41,12 @@ impl Session {
     }
 
     /// The audio profile stays as it is. Turning it back on here, as the link
-    /// went down, only worked when it beat the audio card's going (once in
-    /// five, 11-13), and then WirePlumber remembered "on": the next connection
-    /// came up with the audio on while the iPhone had it, a stream started
-    /// here, and the AirPods gave this computer the audio (23:12:45). The
-    /// next session sets the profile once it knows who has the audio
-    /// (Switcher::on_card); only the daemon's exit turns it back on.
+    /// went down, rarely beat the audio card's going, and then WirePlumber
+    /// remembered "on": the next connection came up with the audio on while
+    /// the iPhone had it, a stream started here, and the AirPods gave this
+    /// computer the audio (C-51). The next session sets the profile once it
+    /// knows who has the audio (Switcher::on_card); only the daemon's exit
+    /// turns it back on.
     pub async fn stop(self) {
         self.media.stop().await;
         self.aacp.shutdown().await;
@@ -113,7 +113,7 @@ pub enum Release {
     /// This computer connected first, alone, so it was never put on the
     /// priority list; another device joining for the first time on this link
     /// (an iPhone picking the AirPods as its output) made the AirPods drop it
-    /// 0.2–0.4 s later (2026-11-08 13:54:06, 16:50:23). Back, the list can be
+    /// 0.2–0.4 s later (B24). Back, the list can be
     /// sent; the audio stays with the device that joined for it.
     JoinedWhileUnlisted,
 }
@@ -131,9 +131,9 @@ impl Entry {
     /// clearing, since BlueZ's reason only comes a moment later and a shell
     /// must never see the AirPods gone in between.
     fn note_end(&mut self) -> bool {
-        // 18:31:44: BlueZ's notice came first, after the channel's had reset
-        // the join, and overwrote "released" with "not": no Reconnecting with
-        // the clearing, and the round only started by luck of timing
+        // BlueZ's notice can come first, after the channel's has reset the
+        // join, and overwrite "released" with "not": no Reconnecting with the
+        // clearing, and the round only started by luck of timing (B26, C-31)
         if let Some(released) = self.end_noted {
             return released;
         }
@@ -454,8 +454,8 @@ impl Hub {
             // connect (the AirPods may have been busy). Without Apple's
             // Device ID the AirPods take one host at a time, so only while
             // they're free; with it they keep this computer alongside the
-            // iPhone, which often connects first (11-13 23:13:35, 4 s after
-            // the lid opened, before it read as open here): connect anyway.
+            // iPhone, which often connects first (seconds after the lid
+            // opened, before it read as open here): connect anyway (C-50).
             let may_join = advert.connection == 0x00 || self.0.apple_id;
             let due = entry.lid_connect_at.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(10));
             let connect = config.auto_connect && open && may_join && !entry.state.connected && due;
