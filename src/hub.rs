@@ -643,6 +643,15 @@ impl Hub {
             .filter(|p| !p.is_empty())
     }
 
+    pub async fn media(&self, address: &str) -> Option<crate::media_controller::MediaController> {
+        self.0
+            .devices
+            .lock()
+            .await
+            .get(address)
+            .and_then(|e| e.session.as_ref().map(|s| s.media.clone()))
+    }
+
     pub async fn aacp(&self, address: &str) -> Option<AACPManager> {
         self.0
             .devices

@@ -30,7 +30,7 @@ PipeWire + WirePlumber.
 | Case opened nearby (`CaseOpen`) | From BLE adverts (`bleMonitor`, needs BlueZ's experimental mode); clients show a popup |
 | Battery while connected elsewhere | From BLE adverts, decrypted with the pair's key |
 | Pause / resume media when a bud comes out / goes back | `earPause`; LibrePods' logic |
-| Lower the volume while you speak (Conversation Awareness) | `conversationVolume`; LibrePods' logic |
+| Lower the volume while you speak (Conversation Awareness) | `conversationVolume`. The music follows the AirPods' levels: down to a quarter of your volume as you speak, partly back as you pause, faded back when the conversation is over. A volume you set meanwhile stays; calls aren't touched |
 | Switching with an Apple device: shared connection, automatic takeover on playback, Move back | Needs Apple's Device ID; see [Switching between devices](#switching-between-devices) |
 | Stem presses: play / pause, next, previous | The AirPods do it themselves over AVRCP, given `mpris-proxy` (see Install). `stemControl` instead has them report double / triple presses to podsd (`StemPress` signal), which skips tracks itself |
 | Keep the audio codec | Turns a switched-off audio profile back on, preferring AAC |

@@ -242,6 +242,13 @@ impl DeviceIface {
         let raw = def.encode(&value).map_err(fdo::Error::InvalidArgs)?;
         info!("{}: {} -> {:?}", self.address, key, value);
         self.send(def.id, &raw).await?;
+        // The AirPods don't confirm it, and send no levels while it's off
+        if def.id == ControlCommandIdentifiers::ConversationDetectConfig
+            && value == settings::SettingValue::Bool(false)
+            && let Some(media) = self.hub.media(&self.address).await
+        {
+            media.end_conversation("Conversation Awareness turned off").await;
+        }
         // The AirPods don't confirm settings, only listening mode changes (which
         // they may refuse, e.g. Off while it isn't allowed): take the rest as set.
         if def.id != ControlCommandIdentifiers::ListeningMode {

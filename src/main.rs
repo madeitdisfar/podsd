@@ -4,6 +4,7 @@
 mod api;
 mod bluetooth;
 mod config;
+mod conversation;
 mod dbus_api;
 mod devices;
 mod hub;

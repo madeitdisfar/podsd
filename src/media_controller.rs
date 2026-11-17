@@ -1,4 +1,5 @@
 use crate::bluetooth::aacp::EarDetectionStatus;
+use crate::conversation::{self, Step};
 use dbus::arg::RefArg;
 use dbus::blocking::Connection;
 use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
@@ -12,6 +13,7 @@ use libpulse_binding::proplist::Proplist;
 use libpulse_binding::volume::{ChannelVolumes, Volume};
 use log::{debug, error, info, warn};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -54,8 +56,6 @@ struct MediaControllerState {
     elsewhere: bool,
     /// When podsd itself last paused or resumed playback (ear detection)
     self_action_at: Option<std::time::Instant>,
-    conv_original_volume: Option<u32>,
-    conv_conversation_started: bool,
     restart_wireplumber: bool,
 }
 
@@ -75,16 +75,63 @@ impl MediaControllerState {
             disconnect_when_not_wearing: false,
             elsewhere: false,
             self_action_at: None,
-            conv_original_volume: None,
-            conv_conversation_started: false,
             restart_wireplumber: false,
         }
     }
 }
 
+/// The volume podsd holds down for a conversation
+#[derive(Clone, Debug)]
+struct Lowered {
+    sink: String,
+    /// The volume before the conversation, to go back to
+    original: u32,
+    /// What podsd set last: anything else read back is someone else's
+    applied: u32,
+}
+
+#[derive(Default)]
+struct Conversation {
+    lowered: Option<Lowered>,
+    /// The user set the volume during this conversation: theirs stands until it ends
+    user_took_over: bool,
+    /// Moves with every level and end: a fade on its way stops when it does
+    generation: u64,
+}
+
+/// Volumes a conversation left lowered as the AirPods' sink went (the link
+/// dropped, the audio went to another device, a call took it): address ->
+/// (the volume before, the volume left). Outlives the session, so the next
+/// one puts it back.
+static LEFT_LOWERED: std::sync::LazyLock<std::sync::Mutex<HashMap<String, (u32, u32)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn left_over(mac: &str, lowered: &Lowered) {
+    LEFT_LOWERED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(mac.to_string(), (lowered.original, lowered.applied));
+}
+
+async fn sink_volume(sink: &str) -> Option<u32> {
+    let sink = sink.to_string();
+    tokio::task::spawn_blocking(move || get_sink_volume_percent_by_name_sync(&sink))
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn set_sink_volume(sink: &str, volume: u32) -> bool {
+    let sink = sink.to_string();
+    tokio::task::spawn_blocking(move || transition_sink_volume(&sink, volume))
+        .await
+        .unwrap_or(false)
+}
+
 #[derive(Clone)]
 pub struct MediaController {
     state: Arc<Mutex<MediaControllerState>>,
+    conv: Arc<Mutex<Conversation>>,
 }
 
 impl MediaController {
@@ -94,6 +141,7 @@ impl MediaController {
         state.local_mac = local_mac;
         MediaController {
             state: Arc::new(Mutex::new(state)),
+            conv: Arc::new(Mutex::new(Conversation::default())),
         }
     }
 
@@ -144,6 +192,13 @@ impl MediaController {
     /// Another device has the AirPods' audio (or this computer has it again)
     pub async fn set_elsewhere(&self, elsewhere: bool) {
         self.state.lock().await.elsewhere = elsewhere;
+        if elsewhere {
+            self.end_conversation("The audio went to another device").await;
+        } else {
+            // The sink comes a moment after the profile
+            let this = self.clone();
+            tokio::spawn(async move { this.restore_left_over(Duration::from_secs(10)).await });
+        }
     }
 
     pub async fn set_options(&self, disconnect_when_not_wearing: bool, restart_wireplumber: bool) {
@@ -152,9 +207,11 @@ impl MediaController {
         state.restart_wireplumber = restart_wireplumber;
     }
 
-    /// Nothing to stop now that the switching loop lives in switching.rs; kept
-    /// so a session's shutdown reads the same.
-    pub async fn stop(&self) {}
+    /// The session ends (the link went, a new channel, the daemon's exit):
+    /// a volume lowered for a conversation goes back.
+    pub async fn stop(&self) {
+        self.end_conversation("The AirPods' session ended").await;
+    }
 
     /// The MPRIS players that play audio on this computer: the player's process
     /// (or one it started, as browsers play from child processes) has an audio
@@ -725,122 +782,239 @@ impl MediaController {
         }
     }
 
-    pub async fn handle_conversational_awareness(&self, status: u8) {
-        debug!("Entering handle_conversational_awareness with status: {}", status);
-
-        let mac = self.state.lock().await.connected_device_mac.clone();
-        if mac.is_empty() {
-            debug!("No connected device MAC, skipping conversational awareness");
+    /// A Conversation Awareness level: the volume follows it (conversation.rs)
+    pub async fn handle_conversational_awareness(&self, level: u8) {
+        let step = conversation::step(level);
+        debug!("Conversation Awareness level {}: {:?}", level, step);
+        if step == Step::Ignore {
             return;
         }
+        let mac = self.state.lock().await.connected_device_mac.clone();
+        self.restore_left_over(Duration::ZERO).await;
 
-        let sink = match get_sink_name_by_mac(&mac).await {
-            Some(s) => s,
-            None => {
-                warn!(
-                    "Could not find sink for MAC {}, skipping conversational awareness",
-                    mac
-                );
-                return;
-            }
-        };
-
-        let current_volume_opt = tokio::task::spawn_blocking({
-            let sink = sink.clone();
-            move || get_sink_volume_percent_by_name_sync(&sink)
-        })
-            .await
-            .unwrap_or(None);
-
-        match status {
-            1 => {
-                let original = current_volume_opt.unwrap_or(0);
-                debug!("Conversation start (1). Current volume: {}", original);
-                {
-                    let mut state = self.state.lock().await;
-                    if !state.conv_conversation_started {
-                        state.conv_original_volume = Some(original);
-                        state.conv_conversation_started = true;
-                    } else {
-                        debug!(
-                            "Conversation already started; not overwriting conv_original_volume"
-                        );
-                    }
-                }
-                if original > 25 {
-                    let sink_clone = sink.clone();
-                    tokio::task::spawn_blocking(move || transition_sink_volume(&sink_clone, 25))
-                        .await
-                        .unwrap_or(false);
+        let mut conv = self.conv.lock().await;
+        conv.generation += 1;
+        let generation = conv.generation;
+        if step == Step::End {
+            conv.user_took_over = false;
+        }
+        if let Some(lowered) = conv.lowered.clone() {
+            match sink_volume(&lowered.sink).await {
+                // A call took the AirPods (another sink), or the audio went
+                None => {
                     info!(
-                        "Conversation start: lowered volume to 25% (original {})",
-                        original
+                        "Conversation Awareness: the AirPods' sink is gone; their volume goes back to {} when it's here again",
+                        lowered.original
                     );
-                } else {
-                    debug!("Original volume {} <= 25, not reducing to 25", original);
-                }
-            }
-            2 => {
-                let original = self.state.lock().await.conv_original_volume;
-                if let Some(orig) = original {
-                    debug!("Conversation reduce (2). Original: {}", orig);
-                    if orig > 15 {
-                        let sink_clone = sink.clone();
-                        tokio::task::spawn_blocking(move || {
-                            transition_sink_volume(&sink_clone, 15)
-                        })
-                            .await
-                            .unwrap_or(false);
-                        info!(
-                            "Conversation reduce: lowered volume to 15% (original {})",
-                            orig
-                        );
-                    } else {
-                        debug!("Original {} <= 15, not reducing to 15", orig);
-                    }
-                } else {
-                    debug!("No original volume known for status 2, skipping");
-                }
-            }
-            3 => {
-                let (conv_started, conv_original) = {
-                    let state = self.state.lock().await;
-                    (state.conv_conversation_started, state.conv_original_volume)
-                };
-                if !conv_started {
-                    debug!("Received status 3 but conversation was not started; ignoring increase");
+                    left_over(&mac, &lowered);
+                    conv.lowered = None;
                     return;
                 }
-                if let Some(orig) = conv_original {
-                    let target = orig.min(25);
-                    let sink_clone = sink.clone();
-                    tokio::task::spawn_blocking(move || transition_sink_volume(&sink_clone, target))
-                        .await
-                        .unwrap_or(false);
+                Some(current) if conversation::changed_by_someone_else(current, lowered.applied) => {
                     info!(
-                        "Conversation partial increase (3): set volume to {} (original {})",
-                        target, orig
+                        "Conversation Awareness: the volume was set to {} meanwhile (podsd had {}); it stays",
+                        current, lowered.applied
                     );
-                } else if let Some(orig_from_current) = current_volume_opt {
-                    let target = orig_from_current.min(25);
-                    let sink_clone = sink.clone();
-                    tokio::task::spawn_blocking(move || transition_sink_volume(&sink_clone, target))
-                        .await
-                        .unwrap_or(false);
+                    conv.lowered = None;
+                    conv.user_took_over = step != Step::End;
+                    return;
+                }
+                Some(_) => {}
+            }
+        }
+
+        match step {
+            Step::Lower(share) => {
+                if conv.user_took_over {
+                    debug!("The user set the volume during this conversation; leaving it");
+                    return;
+                }
+                if conv.lowered.is_none() {
+                    let Some(lowered) = self.start_lowering(&mac).await else {
+                        return;
+                    };
+                    conv.lowered = Some(lowered);
+                }
+                let lowered = conv.lowered.as_mut().expect("set above");
+                let target = conversation::scaled(lowered.original, share);
+                if target < lowered.applied && set_sink_volume(&lowered.sink, target).await {
                     info!(
-                        "Conversation partial increase (3) with fallback current: set volume to {} (measured {})",
-                        target, orig_from_current
+                        "Conversation Awareness {}: volume {} -> {} ({}% of {})",
+                        level, lowered.applied, target, share, lowered.original
                     );
-                } else {
-                    debug!("No original volume known for status 3, skipping");
+                    lowered.applied = target;
                 }
             }
-            4 | 6 | 7 => {
-                debug!("Conversation end ({}), restoring volume if needed", status);
-                self.restore_volume_if_needed(&sink).await;
+            Step::Partial(share) => {
+                let Some(lowered) = conv.lowered.as_mut() else {
+                    return;
+                };
+                let target = conversation::scaled(lowered.original, share);
+                if target < lowered.applied {
+                    if set_sink_volume(&lowered.sink, target).await {
+                        info!(
+                            "Conversation Awareness {}: volume {} -> {} ({}% of {})",
+                            level, lowered.applied, target, share, lowered.original
+                        );
+                        lowered.applied = target;
+                    }
+                } else if target > lowered.applied {
+                    info!(
+                        "Conversation Awareness {}: volume {} -> {} ({}% of {}), fading",
+                        level, lowered.applied, target, share, lowered.original
+                    );
+                    drop(conv);
+                    self.fade(generation, target, false);
+                }
+            }
+            Step::End => {
+                let Some(lowered) = conv.lowered.as_ref() else {
+                    return;
+                };
+                info!(
+                    "Conversation over (level {}): volume {} -> {}, fading",
+                    level, lowered.applied, lowered.original
+                );
+                let target = lowered.original;
+                drop(conv);
+                self.fade(generation, target, true);
+            }
+            Step::Ignore => {}
+        }
+    }
+
+    /// The volume to lower from, as a conversation starts: only music's
+    /// (A2DP); a call's goes through the headset profile and stays.
+    async fn start_lowering(&self, mac: &str) -> Option<Lowered> {
+        let index = card_index(mac).await?;
+        let profile = tokio::task::spawn_blocking(move || active_profile_sync(index))
+            .await
+            .ok()
+            .flatten()?;
+        if !profile.starts_with("a2dp") {
+            debug!("Conversation Awareness: the AirPods are on {}, not A2DP; the volume stays", profile);
+            return None;
+        }
+        let sink = get_sink_name_by_mac(mac).await?;
+        let original = sink_volume(&sink).await?;
+        Some(Lowered { sink, original, applied: original })
+    }
+
+    /// Raises the volume to `target` bit by bit, on its own task so events
+    /// keep coming. Stops when another level comes (the generation moves),
+    /// or when someone else sets the volume meanwhile; with `ends`, the
+    /// conversation is over once it gets there.
+    fn fade(&self, generation: u64, target: u32, ends: bool) {
+        let this = self.clone();
+        tokio::spawn(async move { this.fade_up(generation, target, ends).await });
+    }
+
+    async fn fade_up(&self, generation: u64, target: u32, ends: bool) {
+        let mut stride = None;
+        loop {
+            let mut conv = self.conv.lock().await;
+            if conv.generation != generation {
+                return;
+            }
+            let Some(lowered) = conv.lowered.clone() else {
+                return;
+            };
+            if stride.is_some() {
+                match sink_volume(&lowered.sink).await {
+                    Some(current) if conversation::changed_by_someone_else(current, lowered.applied) => {
+                        info!(
+                            "Conversation Awareness: the volume was set to {} while fading (podsd had {}); it stays",
+                            current, lowered.applied
+                        );
+                        conv.lowered = None;
+                        conv.user_took_over = !ends;
+                        return;
+                    }
+                    // The sink went: the next level or the session's end sees to it
+                    None => return,
+                    Some(_) => {}
+                }
+            }
+            let stride = *stride.get_or_insert_with(|| conversation::stride(lowered.applied, target));
+            let next = conversation::next_up(lowered.applied, target, stride);
+            if !set_sink_volume(&lowered.sink, next).await {
+                return;
+            }
+            let lowered = conv.lowered.as_mut().expect("checked above");
+            lowered.applied = next;
+            if next >= target {
+                if ends {
+                    conv.lowered = None;
+                }
+                return;
+            }
+            drop(conv);
+            tokio::time::sleep(conversation::FADE_STEP).await;
+        }
+    }
+
+    /// The conversation can't end by its levels any more (Conversation
+    /// Awareness turned off, no AirPod in an ear, the audio going elsewhere,
+    /// the session ending): the volume goes back now. A sink already gone
+    /// gets it back when it's here again (restore_left_over).
+    pub async fn end_conversation(&self, why: &str) {
+        let mac = self.state.lock().await.connected_device_mac.clone();
+        let mut conv = self.conv.lock().await;
+        conv.generation += 1;
+        conv.user_took_over = false;
+        let Some(lowered) = conv.lowered.take() else {
+            return;
+        };
+        match sink_volume(&lowered.sink).await {
+            Some(current) if conversation::changed_by_someone_else(current, lowered.applied) => {
+                info!("{}: the volume was set to {} meanwhile (podsd had {}); it stays", why, current, lowered.applied);
+            }
+            Some(_) if set_sink_volume(&lowered.sink, lowered.original).await => {
+                info!("{}: volume {} -> {}", why, lowered.applied, lowered.original);
             }
             _ => {
-                debug!("Conversation status ({}), ignoring", status);
+                info!(
+                    "{}: the AirPods' sink is gone; their volume goes back to {} when it's here again",
+                    why, lowered.original
+                );
+                left_over(&mac, &lowered);
+            }
+        }
+    }
+
+    /// Puts back a volume a conversation left lowered as the AirPods' sink
+    /// went, once the sink is here again (waiting up to `wait` for it). The
+    /// sink comes back at the volume it went at; anything else is someone
+    /// else's and stays.
+    pub async fn restore_left_over(&self, wait: Duration) {
+        let mac = self.state.lock().await.connected_device_mac.clone();
+        if !LEFT_LOWERED.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&mac) {
+            return;
+        }
+        let start = std::time::Instant::now();
+        let sink = loop {
+            if let Some(sink) = get_sink_name_by_mac(&mac).await {
+                break sink;
+            }
+            if start.elapsed() >= wait {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        };
+        let Some((original, lowered)) = LEFT_LOWERED.lock().unwrap_or_else(|e| e.into_inner()).remove(&mac) else {
+            return;
+        };
+        match sink_volume(&sink).await {
+            Some(current) if !conversation::changed_by_someone_else(current, lowered) => {
+                if set_sink_volume(&sink, original).await {
+                    info!("The AirPods' sink is back: volume {} -> {}, as before the conversation", current, original);
+                }
+            }
+            Some(current) => {
+                debug!("The AirPods' sink is back at {} (left at {}); it stays", current, lowered);
+            }
+            None => {
+                LEFT_LOWERED.lock().unwrap_or_else(|e| e.into_inner()).insert(mac, (original, lowered));
             }
         }
     }
@@ -890,27 +1064,6 @@ impl MediaController {
         })
             .await
             .unwrap();
-    }
-
-    async fn restore_volume_if_needed(&self, sink: &str) {
-        let maybe_original = {
-            let mut state = self.state.lock().await;
-            if state.conv_conversation_started {
-                let orig = state.conv_original_volume;
-                state.conv_original_volume = None;
-                state.conv_conversation_started = false;
-                orig
-            } else {
-                return;
-            }
-        };
-
-        if let Some(orig) = maybe_original {
-            let sink = sink.to_string();
-            tokio::task::spawn_blocking(move || transition_sink_volume(&sink, orig))
-                .await
-                .unwrap_or(false);
-        }
     }
 
     fn list_mpris_services(conn: &Connection) -> Vec<String> {

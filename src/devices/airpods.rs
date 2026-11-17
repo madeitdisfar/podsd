@@ -237,6 +237,8 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
         tasks.push(tokio::spawn(async move {
             if media.wait_for_card(Duration::from_secs(30)).await {
                 switcher.on_card().await;
+                // A conversation's lowered volume the last link went with
+                media.restore_left_over(Duration::from_secs(10)).await;
             } else {
                 info!("{}: no audio card for the AirPods after 30 s", address);
             }
@@ -372,6 +374,12 @@ async fn handle_event(
             if let Some(owns) = owns {
                 switcher.on_ownership(owns).await;
             }
+            // No levels come while it's off, so none ends the conversation
+            if status.identifier == ControlCommandIdentifiers::ConversationDetectConfig
+                && status.value.first() == Some(&0x02)
+            {
+                media.end_conversation("Conversation Awareness turned off").await;
+            }
         }
         AACPEvent::EarDetection(old, new) => {
             hub.update(address, |s| {
@@ -381,6 +389,9 @@ async fn handle_event(
             .await;
             let in_ear = |v: &Vec<EarDetectionStatus>| v.contains(&EarDetectionStatus::InEar);
             let (was_in, any_in) = (in_ear(&old), in_ear(&new));
+            if !any_in {
+                media.end_conversation("No AirPod in an ear").await;
+            }
             // The AirPods' own Automatic Ear Detection setting turns this off,
             // as on iOS (pause / resume stop there too). The AirPods never report
             // it, so this is the value set through podsd (or on by default).
