@@ -48,7 +48,7 @@ of working out its encoding.
 |---|---|
 | **Audio & Routing** | |
 | Personalized Volume adjusting the volume here | The setting works (`personalized-volume`), and with it on the AirPods send Adaptive Volume messages (`0x4C`), which no project has decoded yet. On an iPhone the host seems to do the adjusting; podsd doesn't, so the volume here stays as set |
-| Loud Sound Reduction | Control command `0x29` (reported); LibrePods notes it needs VendorID spoofing |
+| Loud Sound Reduction | Not a control command: LibrePods' Android app switches it over ATT (handle `0x1B`, a second channel podsd doesn't open yet), which the AirPods answer only with Apple's Device ID |
 | Equalizer | The AirPods send EQ data (`0x53`); not parsed |
 | Spatial Audio, Personalized Spatial Audio | Head tracking stream not implemented |
 | Microphone (automatic / left / right) | Control command `0x01` |
