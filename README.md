@@ -46,6 +46,7 @@ of working out its encoding.
 | Feature | Notes |
 |---|---|
 | **Audio & Routing** | |
+| Personalized Volume adjusting the volume here | The setting works (`personalized-volume`), and with it on the AirPods send Adaptive Volume messages (`0x4C`), which no project has decoded yet. On an iPhone the host seems to do the adjusting; podsd doesn't, so the volume here stays as set |
 | Loud Sound Reduction | Control command `0x29` (reported); LibrePods notes it needs VendorID spoofing |
 | Equalizer | The AirPods send EQ data (`0x53`); not parsed |
 | Spatial Audio, Personalized Spatial Audio | Head tracking stream not implemented |
@@ -199,7 +200,7 @@ busctl --user call io.github.madeitdisfar.Podsd \
 | `listening-mode` | choice | also the `ListeningMode` property |
 | `allow-off-mode` | bool | offer Off among the listening modes |
 | `conversation-awareness` | bool | |
-| `personalized-volume` | bool | |
+| `personalized-volume` | bool | the AirPods' setting; podsd doesn't adjust the volume from it yet (see Not available) |
 | `adaptive-audio-level` | int 0–100 | the raw value the AirPods report (50 by default) |
 | `one-bud-anc` | bool | noise cancellation with one AirPod |
 | `ear-detection` | bool | the AirPods' automatic ear detection |
