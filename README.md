@@ -58,9 +58,10 @@ of working out its encoding.
 | Head Gestures | Needs the head tracking stream |
 | Camera Remote | iOS only |
 | **Accessibility** | |
+| Transparency mode customization (amplification, balance, tone, Conversation Boost, ambient noise reduction) | ATT handle `0x18`, on the channel podsd opens for Loud Sound Reduction; LibrePods' Android app writes it |
 | Tone Volume | Control command `0x1F` (reported) |
 | **Hearing Health** | |
-| Hearing Assistance, hearing test, Hearing Aid | Control command `0x2C` (reported); LibrePods notes VendorID spoofing and ATT |
+| Hearing Assistance, hearing test, Hearing Aid | Control command `0x2C` (reported) and ATT handle `0x2A` (the channel podsd opens for Loud Sound Reduction), as in LibrePods' Android app |
 | **Battery** | |
 | Optimized Charge Limit | Control command `0x3B` (reported) |
 | Charging notifications | Not in podsd; a client can notify (the dots shell warns at 10 %) |
@@ -85,7 +86,8 @@ podsctl status
 ./install.sh --uninstall
 ```
 
-Logs: `journalctl --user -u podsd`. `podsd --debug` also logs raw packets.
+Logs: `journalctl --user -u podsd`. `podsd --debug` also logs the bytes of packets podsd doesn't
+understand, and the ATT channel's traffic.
 
 ## podsctl
 
@@ -168,7 +170,7 @@ when the AirPods apply it:
 | `SetSetting(s key, v value)` | value: `b` for bool settings, `s` for choices, `i` for ints |
 | `DescribeSettings() → a(sssasii)` | (key, type `bool`/`choice`/`int`, label, choices, min, max) |
 | `Rename(s name)` | |
-| `Refresh()` | asks the AirPods to report their settings again (podsd also asks by itself 3, 10 and 30 s after connecting while settings or notifications are missing). Right after a switch from another device, AirPods Pro 3 report nothing for about 30 s whatever is sent; `ListeningMode` is `""` meanwhile |
+| `Refresh()` | asks the AirPods to report their settings again, and reads the ATT settings again (podsd also asks by itself 3, 10 and 30 s after connecting while settings or notifications are missing). Right after a switch from another device, AirPods Pro 3 report nothing for about 30 s whatever is sent; `ListeningMode` is `""` meanwhile |
 | `Connect()`, `Disconnect()` | through BlueZ |
 | `MoveHere()` | takes the AirPods over from the other device (see [Switching between devices](#switching-between-devices)) |
 
@@ -213,7 +215,7 @@ busctl --user call io.github.madeitdisfar.Podsd \
 
 The AirPods report every setting when the control channel opens but don't confirm
 changes (only listening mode changes come back), so `SetSetting` updates `Settings` once
-the write is sent, as LibrePods' Android app does. Two settings are never reported at all
+the write is sent, as LibrePods' Android app does (over ATT, once the AirPods confirm it). Two settings are never reported at all
 on AirPods Pro 3, `allow-off-mode` and `ear-detection`: podsd remembers the last value
 set for each pair (`~/.local/share/podsd/remembered.json`) and shows that; until one is
 set, `ear-detection` is on (the factory setting) and `allow-off-mode` is missing.
