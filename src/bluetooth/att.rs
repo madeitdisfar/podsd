@@ -49,6 +49,8 @@ pub struct ATTManager {
     response_tx: mpsc::UnboundedSender<Vec<u8>>,
     /// ATT allows one request at a time: held from sending one to its answer
     request: Arc<Mutex<()>>,
+    /// Held while connecting, so two callers don't open two channels
+    connecting: Arc<Mutex<()>>,
 }
 
 impl ATTManager {
@@ -59,10 +61,16 @@ impl ATTManager {
             responses: Arc::new(Mutex::new(rx)),
             response_tx: tx,
             request: Arc::new(Mutex::new(())),
+            connecting: Arc::new(Mutex::new(())),
         }
     }
 
+    /// Opens the channel; does nothing if it's open already
     pub async fn connect(&self, addr: Address) -> Result<()> {
+        let _one_at_a_time = self.connecting.lock().await;
+        if self.is_connected().await {
+            return Ok(());
+        }
         let target = SocketAddr::new(addr, AddressType::BrEdr, PSM_ATT);
         let socket = Socket::new_seq_packet()?;
         let sp = match timeout(CONNECT_TIMEOUT, socket.connect(target)).await {

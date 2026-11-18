@@ -175,17 +175,18 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
     // their own, opened once the AACP setup above has gone out. The AirPods
     // take it only from a host with Apple's Device ID; without it the
     // session goes on without those settings.
+    // Tried again at 10 and 30 s if it doesn't open (after a switch from
+    // the phone the AirPods hold the AACP settings back about 30 s, and
+    // maybe this too); later, Refresh and SetSetting open it if it's closed.
     let att = ATTManager::new();
     {
         let (att, hub, address) = (att.clone(), hub.clone(), address.clone());
         tasks.push(tokio::spawn(async move {
-            sleep(Duration::from_secs(1)).await;
-            match att.connect(mac).await {
-                Ok(()) => read_att_settings(&hub, &att, &address).await,
-                Err(e) => info!(
-                    "{}: no ATT channel ({}): Loud Sound Reduction needs Apple's Device ID",
-                    address, e
-                ),
+            for wait in [1, 9, 20] {
+                sleep(Duration::from_secs(wait)).await;
+                if open_att(&hub, &att, &address).await {
+                    return;
+                }
             }
         }));
     }
@@ -319,6 +320,27 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
 
     drop(command_tx);
     Some(Session { aacp, att, media, switcher: Some(switcher), tasks })
+}
+
+/// Opens the ATT channel if it isn't open, reading its settings as it
+/// opens. Whether it's open.
+pub async fn open_att(hub: &Hub, att: &ATTManager, address: &str) -> bool {
+    if att.is_connected().await {
+        return true;
+    }
+    let Ok(mac) = address.parse::<Address>() else {
+        return false;
+    };
+    match att.connect(mac).await {
+        Ok(()) => {
+            read_att_settings(hub, att, address).await;
+            true
+        }
+        Err(e) => {
+            info!("{}: no ATT channel ({}): Loud Sound Reduction needs Apple's Device ID", address, e);
+            false
+        }
+    }
 }
 
 /// Reads the settings kept over ATT into the state (at connect and on

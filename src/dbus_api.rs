@@ -3,6 +3,7 @@
 //! the AirPods confirm them.
 
 use crate::bluetooth::aacp::ControlCommandIdentifiers;
+use crate::devices::airpods::{open_att, read_att_settings};
 use crate::hub::Hub;
 use crate::settings::{self, LISTENING_MODES, SETTINGS, SettingValue, Via};
 use crate::state::{DeviceState, settings_dict};
@@ -246,10 +247,10 @@ impl DeviceIface {
             // ATT confirms the write: an error here is the AirPods refusing it
             Via::Att(handle) => {
                 let att = match self.hub.att(&self.address).await {
-                    Some(att) if att.is_connected().await => att,
+                    Some(att) if open_att(&self.hub, &att, &self.address).await => att,
                     _ => {
                         return Err(fdo::Error::Failed(format!(
-                            "{key}: the AirPods' ATT channel isn't open (it needs Apple's Device ID)"
+                            "{key}: the AirPods' ATT channel doesn't open (it needs Apple's Device ID)"
                         )));
                     }
                 };
@@ -324,11 +325,14 @@ impl DeviceIface {
             .await
             .ok_or_else(|| fdo::Error::Failed("AirPods are not connected".into()))?;
         info!("{}: asking for the state again", self.address);
-        // The settings kept over ATT are read, not reported
-        if let Some(att) = self.hub.att(&self.address).await
-            && att.is_connected().await
-        {
-            crate::devices::airpods::read_att_settings(&self.hub, &att, &self.address).await;
+        // The settings kept over ATT are read, not reported; a closed
+        // channel is opened again (and read as it opens)
+        if let Some(att) = self.hub.att(&self.address).await {
+            if att.is_connected().await {
+                read_att_settings(&self.hub, &att, &self.address).await;
+            } else {
+                open_att(&self.hub, &att, &self.address).await;
+            }
         }
         aacp.request_state()
             .await
