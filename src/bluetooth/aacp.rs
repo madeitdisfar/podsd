@@ -33,6 +33,9 @@ pub mod opcodes {
     pub const PROXIMITY_KEYS_RSP: u8 = 0x31;
     pub const STEM_PRESS: u8 = 0x19;
     pub const EQ_DATA: u8 = 0x53;
+    /// Sent with "Pause media when falling asleep" on (apple-wireshark:
+    /// "Sleep Detection Update", 5 bytes); not decoded
+    pub const SLEEP_DETECTION_UPDATE: u8 = 0x57;
     pub const CONNECTED_DEVICES: u8 = 0x2E;
     pub const AUDIO_SOURCE: u8 = 0x0E;
     pub const SMART_ROUTING: u8 = 0x10;
@@ -1020,6 +1023,9 @@ impl AACPManager {
             }
             opcodes::EQ_DATA => {
                 debug!("Received EQ Data");
+            }
+            opcodes::SLEEP_DETECTION_UPDATE => {
+                info!("Received Sleep Detection Update: {}", hex::encode(&packet[4..]));
             }
             // The bytes too, for working out what's in them (the keys have
             // their own opcode, handled above, so they never get here)

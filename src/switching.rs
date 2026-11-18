@@ -590,6 +590,9 @@ impl Switcher {
             let (started, blocked) = {
                 let mut st = self.state.lock().await;
                 let started = active && !st.was_active;
+                if active != st.was_active {
+                    info!("{}: playback here {}", self.address, if active { "started" } else { "stopped" });
+                }
                 st.was_active = active;
                 let recently_lost = st.lost_at.is_some_and(|t| t.elapsed() < LOST_GRACE);
                 (started, recently_lost)
