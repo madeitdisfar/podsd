@@ -1021,7 +1021,9 @@ impl AACPManager {
             opcodes::EQ_DATA => {
                 debug!("Received EQ Data");
             }
-            _ => debug!("Received unknown packet with opcode {:#04x}", opcode),
+            // The bytes too, for working out what's in them (the keys have
+            // their own opcode, handled above, so they never get here)
+            _ => debug!("Received unknown packet with opcode {:#04x}: {}", opcode, hex::encode(packet)),
         }
     }
 
