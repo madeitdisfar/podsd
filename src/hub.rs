@@ -23,6 +23,8 @@ use zbus::zvariant::Value;
 /// The live connection to one pair of AirPods.
 pub struct Session {
     pub aacp: AACPManager,
+    /// The channel for settings kept over ATT (open only with Apple's Device ID)
+    pub att: crate::bluetooth::att::ATTManager,
     pub media: MediaController,
     pub switcher: Option<crate::switching::Switcher>,
     pub tasks: Vec<JoinHandle<()>>,
@@ -37,6 +39,7 @@ impl Session {
             task.abort();
         }
         self.media.stop().await;
+        self.att.shutdown().await;
         self.aacp.shutdown().await;
     }
 
@@ -49,6 +52,7 @@ impl Session {
     /// turns it back on.
     pub async fn stop(self) {
         self.media.stop().await;
+        self.att.shutdown().await;
         self.aacp.shutdown().await;
         for task in self.tasks {
             task.abort();
@@ -641,6 +645,15 @@ impl Hub {
             .get(address)
             .map(|e| e.bluez_path.clone())
             .filter(|p| !p.is_empty())
+    }
+
+    pub async fn att(&self, address: &str) -> Option<crate::bluetooth::att::ATTManager> {
+        self.0
+            .devices
+            .lock()
+            .await
+            .get(address)
+            .and_then(|e| e.session.as_ref().map(|s| s.att.clone()))
     }
 
     pub async fn media(&self, address: &str) -> Option<crate::media_controller::MediaController> {

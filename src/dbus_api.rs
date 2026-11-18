@@ -4,7 +4,7 @@
 
 use crate::bluetooth::aacp::ControlCommandIdentifiers;
 use crate::hub::Hub;
-use crate::settings::{self, LISTENING_MODES, SETTINGS, SettingValue};
+use crate::settings::{self, LISTENING_MODES, SETTINGS, SettingValue, Via};
 use crate::state::{DeviceState, settings_dict};
 use log::info;
 use std::collections::HashMap;
@@ -241,9 +241,25 @@ impl DeviceIface {
             .ok_or_else(|| fdo::Error::InvalidArgs(format!("{key}: unsupported value type")))?;
         let raw = def.encode(&value).map_err(fdo::Error::InvalidArgs)?;
         info!("{}: {} -> {:?}", self.address, key, value);
-        self.send(def.id, &raw).await?;
+        match def.via {
+            Via::Control(id) => self.send(id, &raw).await?,
+            // ATT confirms the write: an error here is the AirPods refusing it
+            Via::Att(handle) => {
+                let att = match self.hub.att(&self.address).await {
+                    Some(att) if att.is_connected().await => att,
+                    _ => {
+                        return Err(fdo::Error::Failed(format!(
+                            "{key}: the AirPods' ATT channel isn't open (it needs Apple's Device ID)"
+                        )));
+                    }
+                };
+                att.write(handle, &raw)
+                    .await
+                    .map_err(|e| fdo::Error::Failed(format!("Writing {key} failed: {e}")))?;
+            }
+        }
         // The AirPods don't confirm it, and send no levels while it's off
-        if def.id == ControlCommandIdentifiers::ConversationDetectConfig
+        if def.via == Via::Control(ControlCommandIdentifiers::ConversationDetectConfig)
             && value == settings::SettingValue::Bool(false)
             && let Some(media) = self.hub.media(&self.address).await
         {
@@ -251,7 +267,7 @@ impl DeviceIface {
         }
         // The AirPods don't confirm settings, only listening mode changes (which
         // they may refuse, e.g. Off while it isn't allowed): take the rest as set.
-        if def.id != ControlCommandIdentifiers::ListeningMode {
+        if def.via != Via::Control(ControlCommandIdentifiers::ListeningMode) {
             if settings::UNREPORTED.iter().any(|(k, _)| *k == key) {
                 crate::utils::remember_setting(&self.address, &key, &value);
             }
@@ -308,6 +324,12 @@ impl DeviceIface {
             .await
             .ok_or_else(|| fdo::Error::Failed("AirPods are not connected".into()))?;
         info!("{}: asking for the state again", self.address);
+        // The settings kept over ATT are read, not reported
+        if let Some(att) = self.hub.att(&self.address).await
+            && att.is_connected().await
+        {
+            crate::devices::airpods::read_att_settings(&self.hub, &att, &self.address).await;
+        }
         aacp.request_state()
             .await
             .map_err(|e| fdo::Error::Failed(format!("Sending to the AirPods failed: {e}")))

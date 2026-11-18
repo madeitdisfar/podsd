@@ -6,6 +6,7 @@ use crate::bluetooth::aacp::{
     ControlCommandIdentifiers, ControlCommandStatus, EarDetectionStatus, ProximityKeyType, StemPressBudType,
     StemPressType,
 };
+use crate::bluetooth::att::ATTManager;
 use crate::hub::{Hub, Session};
 use crate::switching::Switcher;
 use crate::media_controller::MediaController;
@@ -170,6 +171,25 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
 
     let mut tasks = Vec::new();
 
+    // The settings kept over ATT (Loud Sound Reduction), on a channel of
+    // their own, opened once the AACP setup above has gone out. The AirPods
+    // take it only from a host with Apple's Device ID; without it the
+    // session goes on without those settings.
+    let att = ATTManager::new();
+    {
+        let (att, hub, address) = (att.clone(), hub.clone(), address.clone());
+        tasks.push(tokio::spawn(async move {
+            sleep(Duration::from_secs(1)).await;
+            match att.connect(mac).await {
+                Ok(()) => read_att_settings(&hub, &att, &address).await,
+                Err(e) => info!(
+                    "{}: no ATT channel ({}): Loud Sound Reduction needs Apple's Device ID",
+                    address, e
+                ),
+            }
+        }));
+    }
+
     // Control commands from the playback listener (ownership changes).
     let (command_tx, mut command_rx) =
         tokio::sync::mpsc::unbounded_channel::<(ControlCommandIdentifiers, Vec<u8>)>();
@@ -298,7 +318,27 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
     }
 
     drop(command_tx);
-    Some(Session { aacp, media, switcher: Some(switcher), tasks })
+    Some(Session { aacp, att, media, switcher: Some(switcher), tasks })
+}
+
+/// Reads the settings kept over ATT into the state (at connect and on
+/// Refresh: the AirPods don't announce a change made on another device)
+pub async fn read_att_settings(hub: &Hub, att: &ATTManager, address: &str) {
+    for (def, handle) in settings::over_att() {
+        match att.read(handle).await {
+            Ok(raw) => match def.decode(&raw) {
+                Some(value) => {
+                    info!("{}: {} is {:?} (ATT)", address, def.key, value);
+                    hub.update(address, |s| {
+                        s.settings.insert(def.key.to_string(), value);
+                    })
+                    .await;
+                }
+                None => debug!("{}: {} reads {} over ATT, not understood", address, def.key, hex::encode(&raw)),
+            },
+            Err(e) => debug!("{}: reading {} over ATT failed: {}", address, def.key, e),
+        }
+    }
 }
 
 fn ear_name(status: &EarDetectionStatus) -> &'static str {

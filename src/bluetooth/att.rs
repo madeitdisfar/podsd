@@ -1,275 +1,178 @@
+//! ATT over classic Bluetooth (L2CAP PSM 31): the AirPods keep a few settings
+//! there rather than in AACP, among them Loud Sound Reduction. They answer it
+//! only for a host with Apple's Device ID (LibrePods' "VendorID spoofing").
+//! From LibrePods' linux-rust branch; reads and writes only, one at a time.
+
 use bluer::l2cap::{SeqPacket, Socket, SocketAddr};
 use bluer::{Address, AddressType, Error, Result};
-use hex;
-use log::{debug, error, info};
-use std::collections::HashMap;
+use log::{debug, info};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinSet;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, timeout};
 
 const PSM_ATT: u16 = 0x001F;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const POLL_INTERVAL: Duration = Duration::from_millis(200);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+const OPCODE_ERROR_RESPONSE: u8 = 0x01;
 const OPCODE_READ_REQUEST: u8 = 0x0A;
+const OPCODE_READ_RESPONSE: u8 = 0x0B;
 const OPCODE_WRITE_REQUEST: u8 = 0x12;
-const OPCODE_HANDLE_VALUE_NTF: u8 = 0x1B;
 const OPCODE_WRITE_RESPONSE: u8 = 0x13;
-const RESPONSE_TIMEOUT: u64 = 5000;
+const OPCODE_HANDLE_VALUE_NTF: u8 = 0x1B;
 
+/// The AirPods' handles (LibrePods' Android app)
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ATTHandles {
-    AirPodsTransparency = 0x18,
-    AirPodsLoudSoundReduction = 0x1B,
-    AirPodsHearingAid = 0x2A,
-    NothingEverything = 0x8002,
-    NothingEverythingRead = 0x8005, // for some reason, and not the same as the write handle
+    Transparency = 0x18,
+    LoudSoundReduction = 0x1B,
+    HearingAid = 0x2A,
 }
 
-#[repr(u16)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ATTCCCDHandles {
-    Transparency = ATTHandles::AirPodsTransparency as u16 + 1,
-    LoudSoundReduction = ATTHandles::AirPodsLoudSoundReduction as u16 + 1,
-    HearingAid = ATTHandles::AirPodsHearingAid as u16 + 1,
+fn io_error(kind: std::io::ErrorKind, what: &str) -> Error {
+    Error::from(std::io::Error::new(kind, what.to_string()))
 }
 
-impl From<ATTHandles> for ATTCCCDHandles {
-    fn from(handle: ATTHandles) -> Self {
-        match handle {
-            ATTHandles::AirPodsTransparency => ATTCCCDHandles::Transparency,
-            ATTHandles::AirPodsLoudSoundReduction => ATTCCCDHandles::LoudSoundReduction,
-            ATTHandles::AirPodsHearingAid => ATTCCCDHandles::HearingAid,
-            ATTHandles::NothingEverything => panic!("No CCCD for NothingEverything handle"), // we don't request it
-            ATTHandles::NothingEverythingRead => panic!("No CCD for NothingEverythingRead handle"), // it sends notifications without CCCD
-        }
-    }
-}
-
-struct ATTManagerState {
+#[derive(Default)]
+struct Channel {
     sender: Option<mpsc::Sender<Vec<u8>>>,
-    listeners: HashMap<u16, Vec<mpsc::UnboundedSender<Vec<u8>>>>,
-}
-
-impl ATTManagerState {
-    fn new() -> Self {
-        ATTManagerState {
-            sender: None,
-            listeners: HashMap::new(),
-        }
-    }
+    tasks: Vec<JoinHandle<()>>,
 }
 
 #[derive(Clone)]
 pub struct ATTManager {
-    state: Arc<Mutex<ATTManagerState>>,
-    response_rx: Arc<Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
+    channel: Arc<Mutex<Channel>>,
+    /// Answers to requests (whole PDUs); notifications don't go here
+    responses: Arc<Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
     response_tx: mpsc::UnboundedSender<Vec<u8>>,
-    tasks: Arc<Mutex<JoinSet<()>>>,
+    /// ATT allows one request at a time: held from sending one to its answer
+    request: Arc<Mutex<()>>,
 }
 
 impl ATTManager {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         ATTManager {
-            state: Arc::new(Mutex::new(ATTManagerState::new())),
-            response_rx: Arc::new(Mutex::new(rx)),
+            channel: Arc::new(Mutex::new(Channel::default())),
+            responses: Arc::new(Mutex::new(rx)),
             response_tx: tx,
-            tasks: Arc::new(Mutex::new(JoinSet::new())),
+            request: Arc::new(Mutex::new(())),
         }
     }
 
-    pub async fn connect(&mut self, addr: Address) -> Result<()> {
-        info!(
-            "ATTManager connecting to {} on PSM {:#06X}...",
-            addr, PSM_ATT
-        );
-        let target_sa = SocketAddr::new(addr, AddressType::BrEdr, PSM_ATT);
-
+    pub async fn connect(&self, addr: Address) -> Result<()> {
+        let target = SocketAddr::new(addr, AddressType::BrEdr, PSM_ATT);
         let socket = Socket::new_seq_packet()?;
-        let seq_packet_result =
-            tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(target_sa)).await;
-        let seq_packet = match seq_packet_result {
-            Ok(Ok(s)) => Arc::new(s),
-            Ok(Err(e)) => {
-                error!("L2CAP connect failed: {}", e);
-                return Err(e.into());
-            }
-            Err(_) => {
-                error!("L2CAP connect timed out");
-                return Err(Error::from(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Connection timeout",
-                )));
-            }
+        let sp = match timeout(CONNECT_TIMEOUT, socket.connect(target)).await {
+            Ok(Ok(sp)) => Arc::new(sp),
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => return Err(io_error(std::io::ErrorKind::TimedOut, "ATT connect timed out")),
         };
-
-        // Wait for connection to be fully established
-        let start = Instant::now();
-        loop {
-            match seq_packet.peer_addr() {
-                Ok(peer) if peer.cid != 0 => break,
-                Ok(_) => {}
-                Err(e) => {
-                    if e.raw_os_error() == Some(107) {
-                        // ENOTCONN
-                        error!("Peer has disconnected during connection setup.");
-                        return Err(e.into());
-                    }
-                    error!("Error getting peer address: {}", e);
-                }
-            }
-            if start.elapsed() >= CONNECT_TIMEOUT {
-                error!("Timed out waiting for L2CAP connection to be fully established.");
-                return Err(Error::from(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Connection timeout",
-                )));
-            }
-            sleep(POLL_INTERVAL).await;
-        }
-
-        info!("L2CAP connection established with {}", addr);
-
-        let (tx, rx) = mpsc::channel(128);
-        let state = ATTManagerState::new();
-        {
-            let mut s = self.state.lock().await;
-            *s = state;
-            s.sender = Some(tx);
-        }
-
-        let manager_clone = self.clone();
-        let mut tasks = self.tasks.lock().await;
-        tasks.spawn(recv_thread(manager_clone, seq_packet.clone()));
-        tasks.spawn(send_thread(rx, seq_packet));
-
+        info!("{}: ATT channel open", addr);
+        let (tx, rx) = mpsc::channel(16);
+        let mut channel = self.channel.lock().await;
+        channel.sender = Some(tx);
+        channel.tasks = vec![
+            tokio::spawn(recv_loop(self.clone(), sp.clone())),
+            tokio::spawn(send_loop(rx, sp)),
+        ];
         Ok(())
     }
 
-    pub async fn register_listener(&self, handle: ATTHandles, tx: mpsc::UnboundedSender<Vec<u8>>) {
-        let mut state = self.state.lock().await;
-        state.listeners.entry(handle as u16).or_default().push(tx);
+    pub async fn is_connected(&self) -> bool {
+        self.channel.lock().await.sender.is_some()
     }
 
-    pub async fn enable_notifications(&self, handle: ATTHandles) -> Result<()> {
-        self.write_cccd(handle.into(), &[0x01, 0x00]).await
+    pub async fn shutdown(&self) {
+        let mut channel = self.channel.lock().await;
+        channel.sender = None;
+        for task in channel.tasks.drain(..) {
+            task.abort();
+        }
     }
 
     pub async fn read(&self, handle: ATTHandles) -> Result<Vec<u8>> {
-        let lsb = (handle as u16 & 0xFF) as u8;
-        let msb = ((handle as u16 >> 8) & 0xFF) as u8;
-        let pdu = vec![OPCODE_READ_REQUEST, lsb, msb];
-        self.send_packet(&pdu).await?;
-        self.read_response().await
+        let h = handle as u16;
+        let answer = self.request(vec![OPCODE_READ_REQUEST, h as u8, (h >> 8) as u8]).await?;
+        match answer.first() {
+            Some(&OPCODE_READ_RESPONSE) => Ok(answer[1..].to_vec()),
+            _ => Err(unexpected(handle, &answer)),
+        }
     }
 
     pub async fn write(&self, handle: ATTHandles, value: &[u8]) -> Result<()> {
-        let lsb = (handle as u16 & 0xFF) as u8;
-        let msb = ((handle as u16 >> 8) & 0xFF) as u8;
-        let mut pdu = vec![OPCODE_WRITE_REQUEST, lsb, msb];
+        let h = handle as u16;
+        let mut pdu = vec![OPCODE_WRITE_REQUEST, h as u8, (h >> 8) as u8];
         pdu.extend_from_slice(value);
-        self.send_packet(&pdu).await?;
-        self.read_response().await?;
-        Ok(())
-    }
-
-    async fn write_cccd(&self, handle: ATTCCCDHandles, value: &[u8]) -> Result<()> {
-        let lsb = (handle as u16 & 0xFF) as u8;
-        let msb = ((handle as u16 >> 8) & 0xFF) as u8;
-        let mut pdu = vec![OPCODE_WRITE_REQUEST, lsb, msb];
-        pdu.extend_from_slice(value);
-        self.send_packet(&pdu).await?;
-        self.read_response().await?;
-        Ok(())
-    }
-
-    async fn send_packet(&self, data: &[u8]) -> Result<()> {
-        let state = self.state.lock().await;
-        if let Some(sender) = &state.sender {
-            sender.send(data.to_vec()).await.map_err(|e| {
-                error!("Failed to send packet to channel: {}", e);
-                Error::from(std::io::Error::new(
-                    std::io::ErrorKind::NotConnected,
-                    "L2CAP send channel closed",
-                ))
-            })
-        } else {
-            error!("Cannot send packet, sender is not available.");
-            Err(Error::from(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "L2CAP stream not connected",
-            )))
+        let answer = self.request(pdu).await?;
+        match answer.first() {
+            Some(&OPCODE_WRITE_RESPONSE) => Ok(()),
+            _ => Err(unexpected(handle, &answer)),
         }
     }
 
-    async fn read_response(&self) -> Result<Vec<u8>> {
-        debug!("Waiting for response...");
-        let mut rx = self.response_rx.lock().await;
-        match tokio::time::timeout(Duration::from_millis(RESPONSE_TIMEOUT), rx.recv()).await {
-            Ok(Some(resp)) => Ok(resp),
-            Ok(None) => Err(Error::from(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "Response channel closed",
-            ))),
-            Err(_) => Err(Error::from(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "Response timeout",
-            ))),
+    /// Sends a request and waits for its answer (or the AirPods' error)
+    async fn request(&self, pdu: Vec<u8>) -> Result<Vec<u8>> {
+        let _one_at_a_time = self.request.lock().await;
+        let mut responses = self.responses.lock().await;
+        // An answer that came after its request timed out isn't this one's
+        while responses.try_recv().is_ok() {}
+        let sender = self.channel.lock().await.sender.clone();
+        let sender = sender.ok_or_else(|| io_error(std::io::ErrorKind::NotConnected, "ATT channel not open"))?;
+        sender
+            .send(pdu)
+            .await
+            .map_err(|_| io_error(std::io::ErrorKind::NotConnected, "ATT channel closed"))?;
+        match timeout(RESPONSE_TIMEOUT, responses.recv()).await {
+            Ok(Some(answer)) => Ok(answer),
+            Ok(None) => Err(io_error(std::io::ErrorKind::UnexpectedEof, "ATT channel closed")),
+            Err(_) => Err(io_error(std::io::ErrorKind::TimedOut, "no ATT answer")),
         }
     }
 }
 
-async fn recv_thread(manager: ATTManager, sp: Arc<SeqPacket>) {
+/// An error response (`01 <request> <handle> <code>`), or anything else
+fn unexpected(handle: ATTHandles, answer: &[u8]) -> Error {
+    let what = if answer.first() == Some(&OPCODE_ERROR_RESPONSE) && answer.len() >= 5 {
+        format!("ATT error {:#04x} for {:?}", answer[4], handle)
+    } else {
+        format!("unexpected ATT answer for {:?}: {}", handle, hex::encode(answer))
+    };
+    io_error(std::io::ErrorKind::Other, &what)
+}
+
+async fn recv_loop(manager: ATTManager, sp: Arc<SeqPacket>) {
     let mut buf = vec![0u8; 1024];
     loop {
         match sp.recv(&mut buf).await {
-            Ok(0) => {
-                info!("Remote closed the connection.");
-                break;
-            }
+            Ok(0) => break,
             Ok(n) => {
-                let data = &buf[..n];
-                debug!("Received {} bytes: {}", n, hex::encode(data));
-                if data.is_empty() {
-                    continue;
-                }
-                if data[0] == OPCODE_HANDLE_VALUE_NTF {
-                    // Notification
-                    let handle = (data[1] as u16) | ((data[2] as u16) << 8);
-                    let value = data[3..].to_vec();
-                    let state = manager.state.lock().await;
-                    if let Some(listeners) = state.listeners.get(&handle) {
-                        for listener in listeners {
-                            let _ = listener.send(value.clone());
-                        }
-                    }
-                } else if data[0] == OPCODE_WRITE_RESPONSE {
-                    let _ = manager.response_tx.send(vec![]);
-                } else {
-                    // Response
-                    let _ = manager.response_tx.send(data[1..].to_vec());
+                let pdu = &buf[..n];
+                debug!("ATT received: {}", hex::encode(pdu));
+                // Notifications aren't asked for (LibrePods: they don't come
+                // for Loud Sound Reduction); the rest answers a request
+                if pdu.first() != Some(&OPCODE_HANDLE_VALUE_NTF) {
+                    let _ = manager.response_tx.send(pdu.to_vec());
                 }
             }
             Err(e) => {
-                error!("read error: {}", e);
+                debug!("ATT read error: {}", e);
                 break;
             }
         }
     }
-    let mut state = manager.state.lock().await;
-    state.sender = None;
+    info!("ATT channel closed");
+    manager.channel.lock().await.sender = None;
 }
 
-async fn send_thread(mut rx: mpsc::Receiver<Vec<u8>>, sp: Arc<SeqPacket>) {
-    while let Some(data) = rx.recv().await {
-        if let Err(e) = sp.send(&data).await {
-            error!("Failed to send data: {}", e);
+async fn send_loop(mut rx: mpsc::Receiver<Vec<u8>>, sp: Arc<SeqPacket>) {
+    while let Some(pdu) = rx.recv().await {
+        if let Err(e) = sp.send(&pdu).await {
+            debug!("ATT send failed: {}", e);
             break;
         }
-        debug!("Sent {} bytes: {}", data.len(), hex::encode(&data));
+        debug!("ATT sent: {}", hex::encode(&pdu));
     }
-    info!("send thread finished.");
 }

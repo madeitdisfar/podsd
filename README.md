@@ -24,7 +24,7 @@ PipeWire 1.6 + WirePlumber.
 | Battery: left, right, case, headset, charging | The case reports through a bud in it, or by itself while charging or just handled if it has its own radio (AirPods Pro 3; with `bleMonitor`); otherwise its last reading is kept, with its time |
 | Ear detection state | Per bud (primary / secondary): in ear, out of ear, in case |
 | Listening mode: Off, Transparency, Adaptive, Noise Cancellation | `ListeningModes` follows iOS: Off needs Off Listening Mode; with one bud in an ear, Adaptive and Noise Cancellation need Noise Cancellation with One AirPod |
-| Settings | Off Listening Mode, Noise Cancellation with One AirPod, Adaptive Audio level, Conversation Awareness, Personalized Volume, Automatic Ear Detection, Pause Media When Falling Asleep, Press Speed, Press and Hold Duration, Volume Swipe and its wait. See [Settings](#settings) |
+| Settings | Off Listening Mode, Noise Cancellation with One AirPod, Adaptive Audio level, Conversation Awareness, Personalized Volume, Loud Sound Reduction, Automatic Ear Detection, Pause Media When Falling Asleep, Press Speed, Press and Hold Duration, Volume Swipe and its wait. See [Settings](#settings) |
 | Name | Renames the AirPods (every device sees it); the BlueZ alias follows, dropping " - Find My" |
 | Connect, disconnect | Through BlueZ |
 | Case opened nearby (`CaseOpen`) | From BLE adverts (`bleMonitor`, needs BlueZ's experimental mode); clients show a popup |
@@ -48,7 +48,6 @@ of working out its encoding.
 |---|---|
 | **Audio & Routing** | |
 | Personalized Volume adjusting the volume here | The setting works (`personalized-volume`), and with it on the AirPods send Adaptive Volume messages (`0x4C`), which no project has decoded yet. On an iPhone the host seems to do the adjusting; podsd doesn't, so the volume here stays as set |
-| Loud Sound Reduction | Not a control command: LibrePods' Android app switches it over ATT (handle `0x1B`, a second channel podsd doesn't open yet), which the AirPods answer only with Apple's Device ID |
 | Equalizer | The AirPods send EQ data (`0x53`); not parsed |
 | Spatial Audio, Personalized Spatial Audio | Head tracking stream not implemented |
 | Microphone (automatic / left / right) | Control command `0x01` |
@@ -204,6 +203,7 @@ busctl --user call io.github.madeitdisfar.Podsd \
 | `personalized-volume` | bool | the AirPods' setting; podsd doesn't adjust the volume from it yet (see Not available) |
 | `adaptive-audio-level` | int 0–100 | the raw value the AirPods report (50 by default) |
 | `one-bud-anc` | bool | noise cancellation with one AirPod |
+| `loud-sound-reduction` | bool | over ATT (see below): needs Apple's Device ID |
 | `ear-detection` | bool | the AirPods' automatic ear detection |
 | `sleep-detection` | bool | pause media when falling asleep |
 | `volume-swipe` | bool | volume control by swiping the stem |
@@ -217,7 +217,12 @@ the write is sent, as LibrePods' Android app does. Two settings are never report
 on AirPods Pro 3, `allow-off-mode` and `ear-detection`: podsd remembers the last value
 set for each pair (`~/.local/share/podsd/remembered.json`) and shows that; until one is
 set, `ear-detection` is on (the factory setting) and `allow-off-mode` is missing.
-Encodings follow LibrePods' Android app. Adding one
+`loud-sound-reduction` isn't an AACP control command: the AirPods keep it on a second
+channel, ATT (L2CAP PSM 31), which they open only to a host with Apple's Device ID
+(see [Switching between devices](#switching-between-devices)). podsd reads it when the
+channel opens and on `Refresh()`, since the AirPods don't announce a change made on another
+device; without the Device ID it's missing, and setting it fails. Encodings follow
+LibrePods' Android app. Adding one
 is an entry in [`src/settings.rs`](src/settings.rs); clients pick it up from
 `DescribeSettings`.
 
