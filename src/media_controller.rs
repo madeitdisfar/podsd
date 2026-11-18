@@ -514,6 +514,18 @@ impl MediaController {
         }
     }
 
+    /// The user fell asleep (the AirPods' Sleep Detection Update): pauses
+    /// what plays here, as an iPhone does, unless another device has the
+    /// audio. Nothing resumes on waking.
+    pub async fn pause_for_sleep(&self) {
+        if self.state.lock().await.elsewhere {
+            debug!("Fell asleep, but another device has the audio: nothing to pause here");
+            return;
+        }
+        info!("Fell asleep: pausing what plays here");
+        self.pause_all_media().await;
+    }
+
     pub async fn pause_all_media(&self) {
         debug!("Pausing all media (without tracking for resume)");
         // Another device took the audio: what ear detection paused before
@@ -555,7 +567,7 @@ impl MediaController {
             .unwrap();
 
         if paused_count > 0 {
-            info!("Paused {} media player(s) due to ownership loss", paused_count);
+            info!("Paused {} media player(s)", paused_count);
             self.state.lock().await.is_playing = false;
         } else {
             debug!("No playing media players found to pause");

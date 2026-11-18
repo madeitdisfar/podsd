@@ -423,6 +423,11 @@ async fn handle_event(
                 }
             }
         }
+        AACPEvent::SleepDetection(state) => match state {
+            0x01 => media.pause_for_sleep().await,
+            0x02 => info!("{}: awake again (nothing resumes)", address),
+            other => debug!("{}: sleep detection state {:#04x}", address, other),
+        },
         AACPEvent::ConversationalAwareness(status) => {
             if config.conversation_volume {
                 media.handle_conversational_awareness(status).await;

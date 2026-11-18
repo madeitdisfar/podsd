@@ -304,6 +304,9 @@ pub enum AACPEvent {
     ControlCommand(ControlCommandStatus),
     EarDetection(Vec<EarDetectionStatus>, Vec<EarDetectionStatus>),
     ConversationalAwareness(u8),
+    /// "Pause media when falling asleep": the AirPods' state, `01` asleep,
+    /// `02` awake again. They don't pause anything themselves.
+    SleepDetection(u8),
     ProximityKeys(Vec<(u8, Vec<u8>)>),
     AudioSource(AudioSource),
     ConnectedDevices(Vec<ConnectedDevice>, Vec<ConnectedDevice>),
@@ -1024,8 +1027,14 @@ impl AACPManager {
             opcodes::EQ_DATA => {
                 debug!("Received EQ Data");
             }
+            // 57 00, length 07 00, then 02 SS 01 and four bytes not decoded
             opcodes::SLEEP_DETECTION_UPDATE => {
                 info!("Received Sleep Detection Update: {}", hex::encode(&packet[4..]));
+                if packet.len() >= 10
+                    && let Some(ref tx) = self.state.lock().await.event_tx
+                {
+                    let _ = tx.send(AACPEvent::SleepDetection(packet[9]));
+                }
             }
             // The bytes too, for working out what's in them (the keys have
             // their own opcode, handled above, so they never get here)
