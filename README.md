@@ -26,7 +26,7 @@ PipeWire 1.6 + WirePlumber.
 | Listening mode: Off, Transparency, Adaptive, Noise Cancellation | `ListeningModes` follows iOS: Off needs Off Listening Mode; with one bud in an ear, Adaptive and Noise Cancellation need Noise Cancellation with One AirPod |
 | Settings | Off Listening Mode, Noise Cancellation with One AirPod, Adaptive Audio level, Conversation Awareness, Personalized Volume, Loud Sound Reduction, Automatic Ear Detection, Pause Media When Falling Asleep, Press Speed, Press and Hold Duration, Volume Swipe and its wait. See [Settings](#settings) |
 | Name | Renames the AirPods (every device sees it); the BlueZ alias follows, dropping " - Find My" |
-| Connect, disconnect | Through BlueZ |
+| Connect, disconnect, forget | Through BlueZ; forgetting (here or in any Bluetooth settings) also deletes what podsd keeps about the pair |
 | Case opened nearby (`CaseOpen`) | From BLE adverts (`bleMonitor`, needs BlueZ's experimental mode); clients show a popup |
 | Battery while connected elsewhere | From BLE adverts, decrypted with the pair's key |
 | Pause / resume media when a bud comes out / goes back | `earPause`; LibrePods' logic |
@@ -74,7 +74,9 @@ of working out its encoding.
 ## Install
 
 Needs Rust, BlueZ, and PipeWire with its PulseAudio server (libpulse). Pair the AirPods with
-BlueZ first.
+BlueZ, before or after installing: podsd picks them up either way. Pair once they show up as
+"<name> - Find My" (the name they give over classic Bluetooth): found only by their Bluetooth
+LE advert (the name without it), BlueZ pairs over LE, and that times out.
 
 `install.sh` also enables BlueZ's `mpris-proxy` (bluez-utils), which tells the AirPods what's
 playing here over AVRCP and passes their commands to the media player. Without it the AirPods
@@ -110,7 +112,7 @@ no default while several pairs are known.
 
 One object per line; each `state` line is the complete state (no deltas), so a client only
 keeps the last one. A new `state` line comes on every change, and when podsd starts or stops
-(`running`).
+(`running`). `watch` doesn't start podsd; the other commands do (D-Bus activation).
 
 ```json
 {"kind":"state","running":true,"devices":[{
@@ -139,7 +141,7 @@ built on it.
 Session bus, service `io.github.madeitdisfar.Podsd`.
 
 - `/io/github/madeitdisfar/Podsd`: `org.freedesktop.DBus.ObjectManager` (lists the devices,
-  announces new ones), `io.github.madeitdisfar.Podsd.Manager1` (`Version` property)
+  announces new and forgotten ones), `io.github.madeitdisfar.Podsd.Manager1` (`Version` property)
 - `/io/github/madeitdisfar/Podsd/dev_XX_XX_XX_XX_XX_XX`: `io.github.madeitdisfar.Podsd.Device1`
 
 `Device1` properties are read-only and announce changes with `PropertiesChanged`:
@@ -345,6 +347,10 @@ Found by running it against AirPods Pro 3 and reading the code:
 - **Conversation Awareness's volume** treated the AirPods' levels as events: it lowered to a
   fixed 25% / 15%, ignored some levels and could leave the volume low. It now follows them as
   targets (see Available).
+- **Forgotten AirPods stayed.** A pair removed from BlueZ kept its keys in `devices.json` and
+  came back at every start, and a pair paired while the daemon ran only showed after a
+  restart (it connects before BlueZ has read its services). Both follow BlueZ now, and the
+  keys are asked for again when the first request is lost on a fresh link.
 - BLE monitor: a failed `bluetoothctl connect` no longer blocks later attempts (as in PR #877),
   and a duplicate attempt no longer ends the advert watcher.
 
