@@ -73,6 +73,9 @@ enum Command {
     Rename { name: String },
     /// Take the AirPods over from the other device sharing them (an iPhone).
     MoveHere,
+    /// Unpair the AirPods and delete what podsd keeps about them (keys,
+    /// remembered settings). They need pairing again.
+    Forget,
 }
 
 type Props = HashMap<String, OwnedValue>;
@@ -370,6 +373,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         return Ok(());
     }
+    // Not a guess for this one
+    if matches!(cli.command, Command::Forget) && cli.device.is_none() && list.len() > 1 {
+        return Err("several AirPods are known: name the pair with -d".into());
+    }
     let (path, props) = pick(&list, cli.device.as_deref()).ok_or("No such AirPods")?;
     match cli.command {
         Command::Mode { mode } => {
@@ -432,6 +439,11 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::MoveHere => {
             call(&conn, path, "MoveHere", &()).await?;
+        }
+        Command::Forget => {
+            call(&conn, path, "Forget", &()).await?;
+            let name = get(props, "Name").as_str().unwrap_or_default().to_string();
+            println!("Forgot {name}");
         }
         Command::Status { .. } | Command::Watch => unreachable!(),
     }

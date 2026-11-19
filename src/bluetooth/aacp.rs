@@ -1,6 +1,6 @@
 use crate::devices::airpods::AirPodsInformation;
 use crate::devices::enums::{DeviceData, DeviceInformation, DeviceType};
-use crate::utils::{load_devices, save_devices};
+use crate::utils::{load_devices, save_device};
 use super::relay;
 use bluer::{
     Address, AddressType, Error, Result,
@@ -798,7 +798,7 @@ impl AACPManager {
                 let mut state = self.state.lock().await;
                 if let Some(mac) = state.airpods_mac {
                     let mac_str = mac.to_string();
-                    let device_data = state.devices.entry(mac_str).or_insert(DeviceData {
+                    let device_data = state.devices.entry(mac_str.clone()).or_insert(DeviceData {
                         name: info.name.clone(),
                         type_: DeviceType::AirPods,
                         information: None,
@@ -809,7 +809,7 @@ impl AACPManager {
                     }
                     device_data.name = info.name.clone();
                     device_data.information = Some(DeviceInformation::AirPods(info.clone()));
-                    save_devices(&state.devices);
+                    save_device(&mac_str, device_data);
                 }
                 info!(
                     "Received Information: name {:?}, model {}, firmware {}",
@@ -891,7 +891,11 @@ impl AACPManager {
                         }
                     }
                 }
-                save_devices(&state.devices);
+                if let Some(mac) = state.airpods_mac.map(|m| m.to_string())
+                    && let Some(data) = state.devices.get(&mac)
+                {
+                    save_device(&mac, data);
+                }
             }
             opcodes::STEM_PRESS => {
                 if payload.len() < 4 {

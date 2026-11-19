@@ -629,6 +629,25 @@ impl Hub {
         });
     }
 
+    /// The pair was unpaired in BlueZ: ends its session, drops its D-Bus
+    /// object and deletes what podsd stored about it (utils::forget_device).
+    /// Paired again, it's a new pair: its keys come at the first connect.
+    pub async fn forget(&self, address: &str) {
+        let entry = self.0.devices.lock().await.remove(address);
+        let known = entry.is_some();
+        if let Some(mut entry) = entry {
+            if let Some(session) = entry.session.take() {
+                session.stop().await;
+            }
+            if let Err(e) = self.0.conn.object_server().remove::<DeviceIface, _>(device_path(address)).await {
+                warn!("Failed to remove {} from D-Bus: {}", address, e);
+            }
+        }
+        if crate::utils::forget_device(address) || known {
+            info!("{}: unpaired; forgot it", address);
+        }
+    }
+
     pub async fn has_device(&self, address: &str) -> bool {
         self.0.devices.lock().await.contains_key(address)
     }

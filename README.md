@@ -100,9 +100,11 @@ podsctl set <key> <value>        e.g. podsctl set conversation-awareness on
 podsctl connect | disconnect
 podsctl rename <name>
 podsctl move-here               take the AirPods over from the other device
+podsctl forget                  unpair the AirPods and delete what podsd keeps about them
 ```
 
-`-d <address or name>` picks the AirPods; the default is the connected pair.
+`-d <address or name>` picks the AirPods; the default is the connected pair. `forget` takes
+no default while several pairs are known.
 
 ### `watch` output
 
@@ -173,6 +175,7 @@ when the AirPods apply it:
 | `Refresh()` | asks the AirPods to report their settings again, and reads the ATT settings again (podsd also asks by itself 3, 10 and 30 s after connecting while settings or notifications are missing). Right after a switch from another device, AirPods Pro 3 report nothing for about 30 s whatever is sent; `ListeningMode` is `""` meanwhile |
 | `Connect()`, `Disconnect()` | through BlueZ |
 | `MoveHere()` | takes the AirPods over from the other device (see [Switching between devices](#switching-between-devices)) |
+| `Forget()` | unpairs the AirPods in BlueZ and deletes what podsd keeps about them; the object goes (`InterfacesRemoved`). They need pairing again |
 
 Signal `MovedTo(s name, b reversed)`: another device took the AirPods; `reversed` when its
 user moved them back from this computer ("Move back" on its notice). Clients show a notice
@@ -306,7 +309,10 @@ Every key is optional:
 | `caseOpenRssi` | `CaseOpen` only for adverts at least this strong (dBm), so a case across the room doesn't count |
 
 Known AirPods and their BLE keys are kept in `~/.local/share/podsd/devices.json` (mode 0600:
-the keys identify the AirPods and decrypt their adverts).
+the keys identify the AirPods and decrypt their adverts), next to `remembered.json` (the
+settings the AirPods never report) and `case-battery.json` (the case's last reading). When
+a pair is unpaired, from `podsctl forget`, any Bluetooth settings or `bluetoothctl remove`,
+podsd deletes its entries, at once or at its next start. Paired again, it gets the keys anew.
 
 ## Changes from LibrePods' `linux/rust`
 

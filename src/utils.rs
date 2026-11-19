@@ -3,8 +3,8 @@ use aes::cipher::Array;
 use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use crate::devices::enums::DeviceData;
 use crate::settings::SettingValue;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 fn xdg_dir(var: &str, fallback: &str) -> PathBuf {
     match std::env::var(var) {
@@ -41,15 +41,16 @@ pub fn remember_setting(address: &str, key: &str, value: &SettingValue) {
     all.entry(address.to_string())
         .or_default()
         .insert(key.to_string(), value.clone());
-    let path = get_remembered_path();
+    write_json(&get_remembered_path(), &all);
+}
+
+fn write_json<T: serde::Serialize>(path: &Path, value: &T) {
     let result = path
         .parent()
         .map(std::fs::create_dir_all)
         .unwrap_or(Ok(()))
-        .and_then(|_| {
-            serde_json::to_string_pretty(&all).map_err(std::io::Error::other)
-        })
-        .and_then(|json| std::fs::write(&path, json));
+        .and_then(|_| serde_json::to_string_pretty(value).map_err(std::io::Error::other))
+        .and_then(|json| std::fs::write(path, json));
     if let Err(e) = result {
         log::error!("Failed to save {}: {}", path.display(), e);
     }
@@ -76,16 +77,7 @@ pub fn save_case_battery(address: &str, level: i32, time: i64) {
         return;
     }
     all.insert(address.to_string(), (level, time));
-    let path = get_case_battery_path();
-    let result = path
-        .parent()
-        .map(std::fs::create_dir_all)
-        .unwrap_or(Ok(()))
-        .and_then(|_| serde_json::to_string(&all).map_err(std::io::Error::other))
-        .and_then(|json| std::fs::write(&path, json));
-    if let Err(e) = result {
-        log::error!("Failed to save {}: {}", path.display(), e);
-    }
+    write_json(&get_case_battery_path(), &all);
 }
 
 pub fn get_config_path() -> PathBuf {
@@ -131,6 +123,44 @@ pub fn load_devices() -> HashMap<String, DeviceData> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Saves one pair's data, leaving the others' as the file has them (a session
+/// doesn't write back a pair forgotten meanwhile)
+pub fn save_device(address: &str, data: &DeviceData) {
+    let mut all = load_devices();
+    all.insert(address.to_string(), data.clone());
+    save_devices(&all);
+}
+
+/// Every pair podsd stored something about
+pub fn stored_addresses() -> HashSet<String> {
+    let mut all: HashSet<String> = load_devices().into_keys().collect();
+    all.extend(load_remembered().into_keys());
+    all.extend(load_case_batteries().into_keys());
+    all
+}
+
+/// Deletes what podsd stored about a pair: its keys and information, the
+/// settings remembered for it and its case's last reading. True if there was any.
+pub fn forget_device(address: &str) -> bool {
+    let mut found = false;
+    let mut devices = load_devices();
+    if devices.remove(address).is_some() {
+        save_devices(&devices);
+        found = true;
+    }
+    let mut remembered = load_remembered();
+    if remembered.remove(address).is_some() {
+        write_json(&get_remembered_path(), &remembered);
+        found = true;
+    }
+    let mut cases = load_case_batteries();
+    if cases.remove(address).is_some() {
+        write_json(&get_case_battery_path(), &cases);
+        found = true;
+    }
+    found
 }
 
 fn e(key: &[u8; 16], data: &[u8; 16]) -> [u8; 16] {

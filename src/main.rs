@@ -55,6 +55,12 @@ fn has_aacp(props: &HashMap<String, OwnedValue>) -> bool {
         .is_some_and(|uuids| uuids.iter().any(|u| u.eq_ignore_ascii_case(AACP_UUID)))
 }
 
+/// A BlueZ device's address, from its path (/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF)
+fn address_of(path: &str) -> Option<String> {
+    let dev = path.rsplit('/').next()?.strip_prefix("dev_")?;
+    Some(dev.replace('_', ":"))
+}
+
 async fn bluez_objects(system: &Connection) -> zbus::Result<BluezObjects> {
     let proxy = ObjectManagerProxy::builder(system)
         .destination("org.bluez")?
@@ -117,18 +123,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     session.object_server().at(ROOT_PATH, ObjectManager).await?;
     session.object_server().at(ROOT_PATH, ManagerIface).await?;
 
-    // Known AirPods: paired in BlueZ, plus any remembered from an earlier run.
+    // Known AirPods: paired in BlueZ, plus any stored from an earlier run
+    // that BlueZ lists without the AirPods' service yet.
     let mut connected = Vec::new();
+    let mut paired = HashMap::new();
     for (path, ifaces) in &objects {
         let Some((_, props)) = ifaces.iter().find(|(n, _)| n.as_str() == "org.bluez.Device1") else {
             continue;
         };
-        if !has_aacp(props) || !prop_bool(props, "Paired").unwrap_or(false) {
+        if !prop_bool(props, "Paired").unwrap_or(false) {
             continue;
         }
         let Some(address) = prop_str(props, "Address") else {
             continue;
         };
+        paired.insert(address.clone(), path.as_str().to_string());
+        if !has_aacp(props) {
+            continue;
+        }
         let name = prop_str(props, "Alias")
             .or_else(|| prop_str(props, "Name"))
             .unwrap_or_else(|| "AirPods".to_string());
@@ -137,13 +149,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             connected.push(address);
         }
     }
+    // Unpaired while podsd wasn't running
+    for address in utils::stored_addresses() {
+        if !paired.contains_key(&address) {
+            hub.forget(&address).await;
+        }
+    }
     for (address, data) in utils::load_devices() {
         if data.type_ == DeviceType::AirPods && !hub.has_device(&address).await {
             let name = match &data.information {
                 Some(DeviceInformation::AirPods(info)) if !info.name.is_empty() => info.name.clone(),
                 _ => data.name.clone(),
             };
-            hub.add_device(&address, &name, "").await;
+            hub.add_device(&address, &name, &paired[&address]).await;
         }
     }
 
@@ -261,11 +279,9 @@ async fn log_disconnect_reasons(hub: Hub) {
     while let Some(Ok(msg)) = stream.next().await {
         let header = msg.header();
         let Some(path) = header.path() else { continue };
-        // /org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF
-        let Some(address) = path.as_str().rsplit('/').next().and_then(|d| d.strip_prefix("dev_")) else {
+        let Some(address) = address_of(path.as_str()) else {
             continue;
         };
-        let address = address.replace('_', ":");
         if !hub.has_device(&address).await {
             continue;
         }
@@ -275,7 +291,8 @@ async fn log_disconnect_reasons(hub: Hub) {
     }
 }
 
-/// Follows BlueZ: AirPods connecting and disconnecting, and newly paired ones.
+/// Follows BlueZ: AirPods connecting and disconnecting, newly paired ones, and
+/// unpaired ones (removed, or no longer Paired), which podsd forgets.
 async fn watch_bluez(hub: Hub) {
     if let Err(e) = watch_bluez_inner(&hub).await {
         error!("Lost BlueZ: {}", e);
@@ -293,12 +310,31 @@ async fn watch_bluez_inner(hub: &Hub) -> zbus::Result<()> {
         .path_namespace("/org/bluez")?
         .arg(0, "org.bluez.Device1")?
         .build();
-    let mut stream = MessageStream::for_match_rule(rule, &system, None).await?;
+    let removed = MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.bluez")?
+        .interface("org.freedesktop.DBus.ObjectManager")?
+        .member("InterfacesRemoved")?
+        .build();
+    // One stream, so a removal is handled after the changes BlueZ sent before it
+    let mut stream = futures::stream::select(
+        MessageStream::for_match_rule(rule, &system, None).await?,
+        MessageStream::for_match_rule(removed, &system, None).await?,
+    );
     info!("Watching BlueZ for AirPods");
 
     while let Some(msg) = stream.next().await {
         let msg = msg?;
         let header = msg.header();
+        if header.member().is_some_and(|m| m.as_str() == "InterfacesRemoved") {
+            if let Ok((path, ifaces)) = msg.body().deserialize::<(OwnedObjectPath, Vec<String>)>()
+                && ifaces.iter().any(|i| i == "org.bluez.Device1")
+                && let Some(address) = address_of(path.as_str())
+            {
+                hub.forget(&address).await;
+            }
+            continue;
+        }
         let Some(path) = header.path() else { continue };
         let Ok((_, changed, _)) = msg
             .body()
@@ -306,6 +342,12 @@ async fn watch_bluez_inner(hub: &Hub) -> zbus::Result<()> {
         else {
             continue;
         };
+        if prop_bool(&changed, "Paired") == Some(false)
+            && let Some(address) = address_of(path.as_str())
+        {
+            hub.forget(&address).await;
+            continue;
+        }
         let Some(is_connected) = prop_bool(&changed, "Connected") else {
             continue;
         };

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use zbus::fdo;
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 pub struct ManagerIface;
 
@@ -347,6 +347,38 @@ impl DeviceIface {
     /// Asks BlueZ to disconnect the AirPods.
     async fn disconnect(&self) -> fdo::Result<()> {
         self.bluez_call("Disconnect").await
+    }
+
+    /// Unpairs the AirPods (BlueZ's RemoveDevice) and forgets them here, as
+    /// the removal is followed (Hub::forget). They need pairing again.
+    async fn forget(&self) -> fdo::Result<()> {
+        info!("{}: asked to forget the AirPods", self.address);
+        let removed = match self.hub.bluez_path(&self.address).await {
+            Some(path) => {
+                let adapter = path.rsplit_once('/').map(|(a, _)| a.to_string()).unwrap_or_default();
+                let device = OwnedObjectPath::try_from(path)
+                    .map_err(|e| fdo::Error::Failed(format!("Bad BlueZ path: {e}")))?;
+                match self
+                    .hub
+                    .system()
+                    .call_method(Some("org.bluez"), adapter.as_str(), Some("org.bluez.Adapter1"), "RemoveDevice", &(device,))
+                    .await
+                {
+                    Ok(_) => true,
+                    // Gone from BlueZ already: nothing will follow
+                    Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == "org.bluez.Error.DoesNotExist" => false,
+                    Err(e) => return Err(fdo::Error::Failed(format!("BlueZ RemoveDevice failed: {e}"))),
+                }
+            }
+            None => false,
+        };
+        if !removed {
+            // From another task: this object is among what goes
+            let hub = self.hub.clone();
+            let address = self.address.clone();
+            tokio::spawn(async move { hub.forget(&address).await });
+        }
+        Ok(())
     }
 
     /// podsd is about to change the volume for Conversation Awareness, over
