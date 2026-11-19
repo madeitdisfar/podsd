@@ -348,9 +348,12 @@ async fn watch_bluez_inner(hub: &Hub) -> zbus::Result<()> {
             hub.forget(&address).await;
             continue;
         }
-        let Some(is_connected) = prop_bool(&changed, "Connected") else {
+        let connected = prop_bool(&changed, "Connected");
+        // A pair connects while pairing, before BlueZ has read its services:
+        // it shows as AirPods only once its UUIDs come
+        if connected.is_none() && !changed.contains_key("UUIDs") {
             continue;
-        };
+        }
 
         let props: HashMap<String, OwnedValue> = match system
             .call_method(
@@ -370,7 +373,8 @@ async fn watch_bluez_inner(hub: &Hub) -> zbus::Result<()> {
             }
         };
         let Some(address) = prop_str(&props, "Address") else { continue };
-        if !hub.has_device(&address).await {
+        let known = hub.has_device(&address).await;
+        if !known {
             if !has_aacp(&props) {
                 continue;
             }
@@ -380,11 +384,15 @@ async fn watch_bluez_inner(hub: &Hub) -> zbus::Result<()> {
             hub.add_device(&address, "", path.as_str()).await;
         }
 
-        if is_connected {
-            info!("{} connected", address);
-            hub.on_connected(&address).await;
-        } else {
-            hub.on_disconnected(&address).await;
+        // Or newly known, and connected since
+        let connected = connected.or((!known).then(|| prop_bool(&props, "Connected")).flatten());
+        match connected {
+            Some(true) => {
+                info!("{} connected", address);
+                hub.on_connected(&address).await;
+            }
+            Some(false) => hub.on_disconnected(&address).await,
+            None => {}
         }
     }
     Ok(())
