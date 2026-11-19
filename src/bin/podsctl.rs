@@ -185,7 +185,23 @@ async fn devices(conn: &Connection) -> Option<Vec<(String, Props)>> {
     Some(list)
 }
 
+/// Whether podsd is running. Asking it anything would start it (D-Bus
+/// activation), and `watch` asks on every change: a podsd stopped by hand
+/// would come straight back.
+async fn running(conn: &Connection) -> bool {
+    let Ok(dbus) = zbus::fdo::DBusProxy::new(conn).await else {
+        return false;
+    };
+    let Ok(name) = zbus::names::BusName::try_from(BUS_NAME) else {
+        return false;
+    };
+    dbus.name_has_owner(name).await.unwrap_or(false)
+}
+
 async fn snapshot(conn: &Connection) -> Json {
+    if !running(conn).await {
+        return json!({ "kind": "state", "running": false, "devices": [] });
+    }
     match devices(conn).await {
         Some(list) => json!({
             "kind": "state",
