@@ -324,6 +324,15 @@ pub async fn start(hub: Hub, address: String) -> Option<Session> {
 
 /// Opens the ATT channel if it isn't open, reading its settings as it
 /// opens. Whether it's open.
+/// Whether the pair's BLE keys are stored (devices.json)
+fn has_keys(address: &str) -> bool {
+    use crate::devices::enums::DeviceInformation;
+    matches!(
+        crate::utils::load_devices().get(address).and_then(|d| d.information.as_ref()),
+        Some(DeviceInformation::AirPods(info)) if !info.le_keys.irk.is_empty()
+    )
+}
+
 pub async fn open_att(hub: &Hub, att: &ATTManager, address: &str) -> bool {
     if att.is_connected().await {
         return true;
@@ -504,6 +513,17 @@ async fn handle_event(
             // thing, as the answer's own mode waits for them (AnswerMode).
             if let Err(e) = aacp.send_set_feature_flags_packet().await {
                 warn!("{}: sending the feature flags again failed: {}", address, e);
+            }
+            // The keys request is lost the same way (seen on a first connect
+            // after pairing)
+            if !has_keys(address) {
+                info!("{}: no BLE keys yet; asking again", address);
+                if let Err(e) = aacp
+                    .send_proximity_keys_request(vec![ProximityKeyType::Irk, ProximityKeyType::EncKey])
+                    .await
+                {
+                    warn!("{}: asking for the keys again failed: {}", address, e);
+                }
             }
             hub.update(address, |s| {
                 if !info.name.is_empty() {
