@@ -281,6 +281,10 @@ pub async fn start_le_monitor(hub: Hub) -> bluer::Result<()> {
                         return;
                     };
                     while let Some(bluer::DeviceEvent::PropertyChanged(prop)) = events.next().await {
+                        // Forgotten since (Hub::forget): its keys are gone
+                        if !hub.has_device(&mac).await {
+                            return;
+                        }
                         match prop {
                             // BlueZ reports an advert only when its content changes,
                             // so with the lid open and nothing changing, the signal
