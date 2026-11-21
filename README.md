@@ -50,7 +50,7 @@ of working out its encoding.
 | Personalized Volume adjusting the volume here | The setting works (`personalized-volume`), and with it on the AirPods send Adaptive Volume messages (`0x4C`), which no project has decoded yet. On an iPhone the host seems to do the adjusting; podsd doesn't, so the volume here stays as set |
 | Spatial Audio, Personalized Spatial Audio | Head tracking stream not implemented |
 | Microphone (automatic / left / right) | Control command `0x01` (LibrePods: `00` automatic, `01` right, `02` left), never reported. Setting it from here made the AirPods drop the other device at once (the iPhone), which set it back to automatic on reconnecting; automatic needs no setting |
-| Charging Case Sounds | Control command `0x31` |
+| Charging Case Sounds | Untested. Control command `0x31` is named "In-Case Tone" (LibrePods' tables), never reported and never sent by any project; iOS seems to set it on the case itself, over the case's own radio, and only while the case is awake |
 | **Controls & Gestures** | |
 | Press and hold actions per bud (listening modes to cycle, Siri) | Control commands `0x16` and `0x1A` |
 | Call controls (answer, mute, end) | Control command `0x24` (reported) |
@@ -232,8 +232,9 @@ channel, ATT (L2CAP PSM 31), which they open only to a host with Apple's Device 
 channel opens and on `Refresh()`, since the AirPods don't announce a change made on another
 device; without the Device ID it's missing, and setting it fails. The equalizer is one
 message of its own (`0x63`: mode and the three bands), which the AirPods report at connect
-and on every change made from any device; setting one part sends all four, and needs the
-AirPods to have reported it (firmware without the equalizer never does). Encodings follow
+and when another device changes it (not back to the device that set it; one change was
+missed in testing, so a value can lag until the next connect). Setting one part sends all
+four, so it needs the AirPods to have reported the equalizer first. Encodings follow
 LibrePods' Android app. Adding one
 is an entry in [`src/settings.rs`](src/settings.rs); clients pick it up from
 `DescribeSettings`.
