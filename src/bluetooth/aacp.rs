@@ -32,7 +32,11 @@ pub mod opcodes {
     pub const PROXIMITY_KEYS_REQ: u8 = 0x30;
     pub const PROXIMITY_KEYS_RSP: u8 = 0x31;
     pub const STEM_PRESS: u8 = 0x19;
+    /// Headphone Accommodations (LibrePods: HEADPHONE_ACCOMMODATION), not decoded
     pub const EQ_DATA: u8 = 0x53;
+    /// The custom equalizer (LibrePods' CUSTOM_EQ): `05 00` length, then
+    /// `01 SS LL MM HH`, mode (`01` Recommended, `02` Custom) and the bands
+    pub const CUSTOM_EQ: u8 = 0x63;
     /// Sent with "Pause media when falling asleep" on (apple-wireshark:
     /// "Sleep Detection Update", 5 bytes); not decoded
     pub const SLEEP_DETECTION_UPDATE: u8 = 0x57;
@@ -307,6 +311,8 @@ pub enum AACPEvent {
     /// "Pause media when falling asleep": the AirPods' state, `01` asleep,
     /// `02` awake again. They don't pause anything themselves.
     SleepDetection(u8),
+    /// The custom equalizer: mode, low, mid, high
+    CustomEq([u8; 4]),
     ProximityKeys(Vec<(u8, Vec<u8>)>),
     AudioSource(AudioSource),
     ConnectedDevices(Vec<ConnectedDevice>, Vec<ConnectedDevice>),
@@ -1031,6 +1037,15 @@ impl AACPManager {
             opcodes::EQ_DATA => {
                 debug!("Received EQ Data");
             }
+            // Sent at every connect and on every change, from any device
+            opcodes::CUSTOM_EQ => {
+                debug!("Received custom EQ: {}", hex::encode(&packet[4..]));
+                if packet.len() >= 13
+                    && let Some(ref tx) = self.state.lock().await.event_tx
+                {
+                    let _ = tx.send(AACPEvent::CustomEq([packet[9], packet[10], packet[11], packet[12]]));
+                }
+            }
             // 57 00, length 07 00, then 02 SS 01 and four bytes not decoded
             opcodes::SLEEP_DETECTION_UPDATE => {
                 info!("Received Sleep Detection Update: {}", hex::encode(&packet[4..]));
@@ -1105,6 +1120,12 @@ impl AACPManager {
             data.push(value.get(i).copied().unwrap_or(0));
         }
         let packet = [opcode.as_slice(), data.as_slice()].concat();
+        self.send_data_packet(&packet).await
+    }
+
+    /// The custom equalizer: mode, low, mid, high (as reported)
+    pub async fn send_custom_eq(&self, raw: [u8; 4]) -> Result<()> {
+        let packet = [opcodes::CUSTOM_EQ, 0x00, 0x05, 0x00, 0x01, raw[0], raw[1], raw[2], raw[3]];
         self.send_data_packet(&packet).await
     }
 

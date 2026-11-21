@@ -1,5 +1,5 @@
-//! The AirPods settings podsd exposes, and how each maps onto an AACP control
-//! command. Clients read the table through `DescribeSettings`, so a setting added
+//! The AirPods settings podsd exposes, and where each lives on the AirPods
+//! (`Via`). Clients read the table through `DescribeSettings`, so a setting added
 //! here shows up in every client without changes there.
 //!
 //! Encodings follow LibrePods' Android app (AirPodsViewModel / *SettingsScreen):
@@ -47,6 +47,19 @@ pub enum Via {
     /// Refresh; a change made on another device isn't announced. Booleans
     /// are 0x01 on / 0x00 off.
     Att(ATTHandles),
+    /// A part of the custom equalizer, which the AirPods keep as one message
+    /// (`0x63`: mode, low, mid, high) and report on every change, from any
+    /// device. Writing one part sends all four.
+    Eq(EqPart),
+}
+
+/// The custom equalizer's parts, in the message's order
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EqPart {
+    Mode,
+    Low,
+    Mid,
+    High,
 }
 
 pub struct SettingDef {
@@ -63,6 +76,9 @@ pub const LISTENING_MODES: &[(u8, &str)] = &[
     (0x04, "adaptive"),
     (0x02, "noise-cancellation"),
 ];
+
+/// Recommended is the AirPods' own tuning; the bands apply only in Custom
+const EQ_MODES: &[(u8, &str)] = &[(0x01, "recommended"), (0x02, "custom")];
 
 const SPEEDS: &[(u8, &str)] = &[(0x00, "default"), (0x01, "slower"), (0x02, "slowest")];
 // Press and hold duration, named as iOS names it
@@ -120,6 +136,31 @@ pub const SETTINGS: &[SettingDef] = &[
         label: "Loud Sound Reduction",
     },
     SettingDef {
+        key: "eq",
+        via: Via::Eq(EqPart::Mode),
+        kind: Kind::Choice(EQ_MODES),
+        label: "Equalizer",
+    },
+    // 0-100, 50 flat (the dB behind them unknown)
+    SettingDef {
+        key: "eq-low",
+        via: Via::Eq(EqPart::Low),
+        kind: Kind::Int { min: 0, max: 100 },
+        label: "Equalizer: low",
+    },
+    SettingDef {
+        key: "eq-mid",
+        via: Via::Eq(EqPart::Mid),
+        kind: Kind::Int { min: 0, max: 100 },
+        label: "Equalizer: mid",
+    },
+    SettingDef {
+        key: "eq-high",
+        via: Via::Eq(EqPart::High),
+        kind: Kind::Int { min: 0, max: 100 },
+        label: "Equalizer: high",
+    },
+    SettingDef {
         key: "ear-detection",
         via: Via::Control(Id::EarDetectionConfig),
         kind: Kind::Bool,
@@ -169,16 +210,52 @@ pub fn by_id(id: Id) -> Option<&'static SettingDef> {
 pub fn over_att() -> impl Iterator<Item = (&'static SettingDef, ATTHandles)> {
     SETTINGS.iter().filter_map(|d| match d.via {
         Via::Att(handle) => Some((d, handle)),
-        Via::Control(_) => None,
+        _ => None,
     })
+}
+
+/// The equalizer's settings, in the message's order
+fn eq_parts() -> impl Iterator<Item = &'static SettingDef> {
+    [EqPart::Mode, EqPart::Low, EqPart::Mid, EqPart::High]
+        .into_iter()
+        .filter_map(|part| SETTINGS.iter().find(|d| d.via == Via::Eq(part)))
+}
+
+/// The equalizer the AirPods reported (mode, low, mid, high) as settings
+pub fn decode_eq(raw: [u8; 4]) -> Vec<(&'static str, SettingValue)> {
+    eq_parts()
+        .zip(raw)
+        .filter_map(|(d, byte)| d.decode(&[byte]).map(|v| (d.key, v)))
+        .collect()
+}
+
+/// The equalizer to send with `key` set to `value`, the other parts as
+/// `current` has them (as last reported)
+pub fn encode_eq(
+    current: &std::collections::BTreeMap<String, SettingValue>,
+    key: &str,
+    value: &SettingValue,
+) -> Result<[u8; 4], String> {
+    let mut raw = [0u8; 4];
+    for (byte, d) in raw.iter_mut().zip(eq_parts()) {
+        let v = if d.key == key {
+            value
+        } else {
+            current
+                .get(d.key)
+                .ok_or_else(|| format!("{key}: the AirPods haven't reported their equalizer"))?
+        };
+        *byte = d.encode(v)?[0];
+    }
+    Ok(raw)
 }
 
 impl SettingDef {
     /// A boolean's (on, off) bytes
     fn bool_bytes(&self) -> (u8, u8) {
         match self.via {
-            Via::Control(_) => (0x01, 0x02),
             Via::Att(_) => (0x01, 0x00),
+            _ => (0x01, 0x02),
         }
     }
 
@@ -267,6 +344,30 @@ mod tests {
         assert_eq!(att.decode(&[0x00]), Some(SettingValue::Bool(false)));
         // 02 means nothing over ATT
         assert_eq!(att.decode(&[0x02]), None);
+    }
+
+    #[test]
+    fn the_equalizer_is_one_message() {
+        // As the AirPods report it: Custom, low 92, mid 50, high 40
+        let got = decode_eq([0x02, 0x5c, 0x32, 0x28]);
+        assert_eq!(
+            got,
+            [
+                ("eq", SettingValue::Str("custom".into())),
+                ("eq-low", SettingValue::Int(92)),
+                ("eq-mid", SettingValue::Int(50)),
+                ("eq-high", SettingValue::Int(40)),
+            ]
+        );
+        let current = got.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        assert_eq!(encode_eq(&current, "eq-mid", &SettingValue::Int(0)), Ok([0x02, 0x5c, 0x00, 0x28]));
+        assert_eq!(
+            encode_eq(&current, "eq", &SettingValue::Str("recommended".into())),
+            Ok([0x01, 0x5c, 0x32, 0x28])
+        );
+        assert!(encode_eq(&current, "eq-low", &SettingValue::Int(101)).is_err());
+        // Nothing reported: nothing to send the other parts with
+        assert!(encode_eq(&Default::default(), "eq-low", &SettingValue::Int(50)).is_err());
     }
 
     #[test]

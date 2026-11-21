@@ -499,6 +499,14 @@ async fn handle_event(
             0x02 => info!("{}: awake again (nothing resumes)", address),
             other => debug!("{}: sleep detection state {:#04x}", address, other),
         },
+        AACPEvent::CustomEq(raw) => {
+            hub.update(address, |s| {
+                for (key, value) in settings::decode_eq(raw) {
+                    s.settings.insert(key.to_string(), value);
+                }
+            })
+            .await;
+        }
         AACPEvent::ConversationalAwareness(status) => {
             if config.conversation_volume {
                 media.handle_conversational_awareness(status).await;

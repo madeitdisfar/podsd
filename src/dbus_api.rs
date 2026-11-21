@@ -258,6 +258,19 @@ impl DeviceIface {
                     .await
                     .map_err(|e| fdo::Error::Failed(format!("Writing {key} failed: {e}")))?;
             }
+            // The whole equalizer goes; the AirPods report it back
+            Via::Eq(_) => {
+                let eq = settings::encode_eq(&self.st().await.settings, &key, &value)
+                    .map_err(fdo::Error::Failed)?;
+                let aacp = self
+                    .hub
+                    .aacp(&self.address)
+                    .await
+                    .ok_or_else(|| fdo::Error::Failed("AirPods are not connected".into()))?;
+                aacp.send_custom_eq(eq)
+                    .await
+                    .map_err(|e| fdo::Error::Failed(format!("Sending to the AirPods failed: {e}")))?;
+            }
         }
         // The AirPods don't confirm it, and send no levels while it's off
         if def.via == Via::Control(ControlCommandIdentifiers::ConversationDetectConfig)
