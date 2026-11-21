@@ -49,7 +49,7 @@ of working out its encoding.
 | **Audio & Routing** | |
 | Personalized Volume adjusting the volume here | The setting works (`personalized-volume`), and with it on the AirPods send Adaptive Volume messages (`0x4C`), which no project has decoded yet. On an iPhone the host seems to do the adjusting; podsd doesn't, so the volume here stays as set |
 | Spatial Audio, Personalized Spatial Audio | Head tracking stream not implemented |
-| Microphone (automatic / left / right) | Control command `0x01` |
+| Microphone (automatic / left / right) | Control command `0x01` (LibrePods: `00` automatic, `01` right, `02` left), never reported. Setting it from here made the AirPods drop the other device at once (the iPhone), which set it back to automatic on reconnecting; automatic needs no setting |
 | Charging Case Sounds | Control command `0x31` |
 | **Controls & Gestures** | |
 | Press and hold actions per bud (listening modes to cycle, Siri) | Control commands `0x16` and `0x1A` |
